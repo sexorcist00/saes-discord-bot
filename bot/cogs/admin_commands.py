@@ -156,19 +156,29 @@ class AdminCommandsCog(commands.Cog):
             )
 
     @role_admin.command(name="sync_user", description="Синхронизировать конкретного пользователя")
-    @app_commands.describe(user_id="ID пользователя Discord")
-    async def sync_specific_user(self, ctx: commands.Context, user_id: int):
+    @app_commands.describe(user_id="ID пользователя Discord (Discord Snowflake)")
+    async def sync_specific_user(self, ctx: commands.Context, user_id: str):
         """Синхронизировать конкретного пользователя"""
         try:
+            # Преобразование в int
+            try:
+                user_id_int = int(user_id)
+            except ValueError:
+                await ctx.send(
+                    embed=create_error_embed("ID пользователя должен быть числом (Discord Snowflake)."),
+                    ephemeral=True
+                )
+                return
+
             # Выполняем синхронизацию
             result = await self.sync_engine.sync_user_roles(
-                user_id=user_id,
+                user_id=user_id_int,
                 trigger_type="manual"
             )
 
             if result.success:
                 result_text = (
-                    f"**Синхронизация пользователя `{user_id}` завершена:**\n\n"
+                    f"**Синхронизация пользователя `{user_id_int}` завершена:**\n\n"
                     f"➕ Добавлено ролей: {len(result.roles_added)}\n"
                     f"➖ Удалено ролей: {len(result.roles_removed)}\n"
                     f"📊 Проверено серверов: {len(result.source_servers)}"
@@ -182,7 +192,7 @@ class AdminCommandsCog(commands.Cog):
                     ephemeral=True
                 )
 
-            logger.info(f"Ручная синхронизация пользователя {user_id} выполнена {ctx.author}")
+            logger.info(f"Ручная синхронизация пользователя {user_id_int} выполнена {ctx.author}")
 
         except Exception as e:
             logger.error(f"Ошибка синхронизации пользователя {user_id}: {e}", exc_info=True)
@@ -216,29 +226,41 @@ class AdminCommandsCog(commands.Cog):
     @role_admin.command(name="add_mapping", description="Добавить новый маппинг роли")
     @app_commands.describe(
         mapping_id="Уникальный ID маппинга",
-        source_server="ID исходного сервера",
-        source_role="ID исходной роли",
-        target_role="ID целевой роли",
+        source_server="ID исходного сервера (Discord Snowflake)",
+        source_role="ID исходной роли (Discord Snowflake)",
+        target_role="ID целевой роли (Discord Snowflake)",
         description="Описание маппинга"
     )
     async def add_mapping(
         self,
         ctx: commands.Context,
         mapping_id: str,
-        source_server: int,
-        source_role: int,
-        target_role: int,
+        source_server: str,
+        source_role: str,
+        target_role: str,
         *,
         description: str = ""
     ):
         """Добавить новый маппинг роли"""
         try:
+            # Преобразование строк в int
+            try:
+                source_server_id = int(source_server)
+                source_role_id = int(source_role)
+                target_role_id = int(target_role)
+            except ValueError:
+                await ctx.send(
+                    embed=create_error_embed("ID должны быть числами (Discord Snowflake)."),
+                    ephemeral=True
+                )
+                return
+
             # Валидация
-            if not validate_server_id(source_server):
+            if not validate_server_id(source_server_id):
                 await ctx.send(embed=create_error_embed("Некорректный ID исходного сервера."), ephemeral=True)
                 return
 
-            if not validate_role_id(source_role) or not validate_role_id(target_role):
+            if not validate_role_id(source_role_id) or not validate_role_id(target_role_id):
                 await ctx.send(embed=create_error_embed("Некорректный ID роли."), ephemeral=True)
                 return
 
@@ -247,10 +269,10 @@ class AdminCommandsCog(commands.Cog):
 
             await self.role_mapper.add_mapping(
                 mapping_id=mapping_id,
-                source_server_id=source_server,
-                source_role_id=source_role,
+                source_server_id=source_server_id,
+                source_role_id=source_role_id,
                 target_server_id=main_server_id,
-                target_role_id=target_role,
+                target_role_id=target_role_id,
                 description=description,
                 enabled=True
             )
@@ -376,15 +398,25 @@ class AdminCommandsCog(commands.Cog):
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
 
     @role_admin.command(name="debug_user", description="Показать детальную информацию о ролях пользователя")
-    @app_commands.describe(user_id="ID пользователя Discord")
-    async def debug_user(self, ctx: commands.Context, user_id: int):
+    @app_commands.describe(user_id="ID пользователя Discord (Discord Snowflake)")
+    async def debug_user(self, ctx: commands.Context, user_id: str):
         """Показать детальную информацию о ролях пользователя на всех серверах"""
         try:
+            # Преобразование в int
+            try:
+                user_id_int = int(user_id)
+            except ValueError:
+                await ctx.send(
+                    embed=create_error_embed("ID пользователя должен быть числом (Discord Snowflake)."),
+                    ephemeral=True
+                )
+                return
+
             # Получаем все сервера где есть пользователь
-            mutual_guilds = await self.sync_engine.get_user_mutual_guilds(user_id)
+            mutual_guilds = await self.sync_engine.get_user_mutual_guilds(user_id_int)
 
             embed = discord.Embed(
-                title=f"🔍 Диагностика пользователя {user_id}",
+                title=f"🔍 Диагностика пользователя {user_id_int}",
                 color=0x3498db
             )
 
@@ -394,7 +426,7 @@ class AdminCommandsCog(commands.Cog):
 
             if main_guild:
                 try:
-                    main_member = await main_guild.fetch_member(user_id)
+                    main_member = await main_guild.fetch_member(user_id_int)
                     roles_text = []
                     for role in main_member.roles:
                         if not role.is_default():
@@ -415,7 +447,7 @@ class AdminCommandsCog(commands.Cog):
             # Другие сервера
             for guild in mutual_guilds:
                 try:
-                    member = await guild.fetch_member(user_id)
+                    member = await guild.fetch_member(user_id_int)
                     roles_text = []
                     for role in member.roles:
                         if not role.is_default():
@@ -430,7 +462,7 @@ class AdminCommandsCog(commands.Cog):
                     continue
 
             # Проверяем маппинги
-            user_roles_map = await self.sync_engine.get_user_roles_from_guilds(user_id, mutual_guilds)
+            user_roles_map = await self.sync_engine.get_user_roles_from_guilds(user_id_int, mutual_guilds)
             target_roles = await self.sync_engine.calculate_target_roles(user_roles_map)
 
             embed.add_field(
