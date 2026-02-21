@@ -64,11 +64,15 @@ class AdminCommandsCog(commands.Cog):
         if ctx.invoked_subcommand is None:
             help_text = (
                 "**Доступные команды администрирования:**\n\n"
-                "`/roleadmin sync_all` - Синхронизировать всех пользователей\n"
-                "`/roleadmin sync_user <ID>` - Синхронизировать конкретного пользователя\n"
-                "`/roleadmin list_mappings` - Показать все маппинги ролей\n"
-                "`/roleadmin add_mapping` - Добавить маппинг роли\n"
-                "`/roleadmin remove_mapping <ID>` - Удалить маппинг\n"
+                "**Синхронизация:**\n"
+                "`/roleadmin sync_user <ID>` - Синхронизировать пользователя\n"
+                "`/roleadmin sync_all` - Синхронизировать всех\n"
+                "`/roleadmin autosync` - Вкл/выкл автосинхронизации\n\n"
+                "**Маппинги:**\n"
+                "`/roleadmin list_mappings` - Список маппингов\n"
+                "`/roleadmin add_mapping` - Добавить маппинг\n"
+                "`/roleadmin remove_mapping <ID>` - Удалить маппинг\n\n"
+                "**Система:**\n"
                 "`/roleadmin reload_config` - Перезагрузить конфигурацию\n"
                 "`/roleadmin check_permissions` - Проверить права бота\n"
                 "`/roleadmin debug_user <ID>` - Диагностика пользователя\n"
@@ -176,21 +180,42 @@ class AdminCommandsCog(commands.Cog):
                 trigger_type="manual"
             )
 
+            # Формируем детальный результат
+            main_guild = self.bot.get_guild(self.bot.config.get_main_server_id())
+            lines = [f"**Синхронизация пользователя <@{user_id_int}>:**\n"]
+
+            if result.roles_added:
+                added = []
+                for rid in result.roles_added:
+                    role = main_guild.get_role(rid) if main_guild else None
+                    added.append(role.mention if role else f"`{rid}`")
+                lines.append(f"➕ Добавлено: {', '.join(added)}")
+
+            if result.roles_removed:
+                removed = []
+                for rid in result.roles_removed:
+                    role = main_guild.get_role(rid) if main_guild else None
+                    removed.append(role.mention if role else f"`{rid}`")
+                lines.append(f"➖ Удалено: {', '.join(removed)}")
+
+            if result.roles_failed:
+                failed = []
+                for rid in result.roles_failed:
+                    role = main_guild.get_role(rid) if main_guild else None
+                    failed.append(role.mention if role else f"`{rid}`")
+                lines.append(f"⚠️ Не удалось выдать: {', '.join(failed)}")
+
+            if not result.roles_added and not result.roles_removed and not result.roles_failed:
+                lines.append("Без изменений")
+
+            lines.append(f"\n📊 Проверено серверов: {len(result.source_servers)}")
+
             if result.success:
-                result_text = (
-                    f"**Синхронизация пользователя `{user_id_int}` завершена:**\n\n"
-                    f"➕ Добавлено ролей: {len(result.roles_added)}\n"
-                    f"➖ Удалено ролей: {len(result.roles_removed)}\n"
-                    f"📊 Проверено серверов: {len(result.source_servers)}"
-                )
-                await ctx.send(embed=create_success_embed(result_text), ephemeral=True)
+                await ctx.send(embed=create_success_embed("\n".join(lines)), ephemeral=True)
             else:
-                await ctx.send(
-                    embed=create_error_embed(
-                        f"Синхронизация завершена с ошибками:\n" + "\n".join(result.errors)
-                    ),
-                    ephemeral=True
-                )
+                if result.errors:
+                    lines.append(f"\n❌ Ошибки: {'; '.join(result.errors[:3])}")
+                await ctx.send(embed=create_error_embed("\n".join(lines), "Синхронизация с ошибками"), ephemeral=True)
 
             logger.info(f"Ручная синхронизация пользователя {user_id_int} выполнена {ctx.author}")
 
@@ -377,26 +402,6 @@ class AdminCommandsCog(commands.Cog):
             logger.error(f"Ошибка проверки прав: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
 
-    @role_admin.command(name="mapper_stats", description="Показать статистику по маппингам")
-    async def mapper_stats(self, ctx: commands.Context):
-        """Показать статистику по маппингам"""
-        try:
-            stats = self.role_mapper.get_stats()
-
-            stats_text = (
-                f"**Статистика маппингов ролей:**\n\n"
-                f"📊 Всего маппингов: {stats['total_mappings']}\n"
-                f"✅ Активных: {stats['enabled_mappings']}\n"
-                f"❌ Отключенных: {stats['disabled_mappings']}\n"
-                f"🌐 Уникальных исходных серверов: {stats['unique_source_servers']}"
-            )
-
-            await ctx.send(embed=create_info_embed(stats_text, "Статистика маппингов"), ephemeral=True)
-
-        except Exception as e:
-            logger.error(f"Ошибка получения статистики маппингов: {e}", exc_info=True)
-            await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
-
     @role_admin.command(name="debug_user", description="Показать детальную информацию о ролях пользователя")
     @app_commands.describe(user_id="ID пользователя Discord (Discord Snowflake)")
     async def debug_user(self, ctx: commands.Context, user_id: str):
@@ -465,17 +470,63 @@ class AdminCommandsCog(commands.Cog):
             user_roles_map = await self.sync_engine.get_user_roles_from_guilds(user_id_int, mutual_guilds)
             target_roles = await self.sync_engine.calculate_target_roles(user_roles_map)
 
-            embed.add_field(
-                name="🎯 Целевые роли (должны быть назначены)",
-                value=f"{len(target_roles)} ролей: {', '.join(f'`{r}`' for r in target_roles)}" if target_roles else "Нет",
-                inline=False
-            )
+            if target_roles and main_guild:
+                target_text = []
+                for rid in target_roles:
+                    role = main_guild.get_role(rid)
+                    target_text.append(role.mention if role else f"`{rid}`")
+                embed.add_field(
+                    name=f"🎯 Целевые роли ({len(target_roles)})",
+                    value=", ".join(target_text),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🎯 Целевые роли",
+                    value="Нет маппингов для ролей этого пользователя",
+                    inline=False
+                )
 
             await ctx.send(embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.error(f"Ошибка диагностики пользователя: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
+
+    @role_admin.command(name="autosync", description="Переключить автоматическую синхронизацию (вкл/выкл)")
+    async def toggle_autosync(self, ctx: commands.Context):
+        """Переключить автоматическую синхронизацию (вкл/выкл)"""
+        # Находим RoleMonitorCog
+        monitor_cog = self.bot.get_cog("RoleMonitorCog")
+        if not monitor_cog:
+            await ctx.send(
+                embed=create_error_embed("Модуль мониторинга не загружен."),
+                ephemeral=True
+            )
+            return
+
+        is_running = monitor_cog.process_pending_syncs.is_running()
+
+        if is_running:
+            monitor_cog.process_pending_syncs.cancel()
+            await ctx.send(
+                embed=create_info_embed(
+                    "Автоматическая синхронизация **отключена**.",
+                    "Автосинхронизация"
+                ),
+                ephemeral=True
+            )
+            logger.info(f"Автосинхронизация отключена пользователем {ctx.author}")
+        else:
+            monitor_cog.process_pending_syncs.start()
+            await ctx.send(
+                embed=create_success_embed(
+                    "Автоматическая синхронизация **включена**.",
+                    "Автосинхронизация"
+                ),
+                ephemeral=True
+            )
+            logger.info(f"Автосинхронизация включена пользователем {ctx.author}")
 
     @role_admin.error
     async def role_admin_error(self, ctx: commands.Context, error: Exception):

@@ -217,9 +217,19 @@ def create_mapping_list_embed(
     end_idx = start_idx + per_page
     page_mappings = mappings[start_idx:end_idx]
 
+    # Считаем статистику
+    enabled_count = sum(1 for m in mappings if m.get('enabled', True))
+    disabled_count = len(mappings) - enabled_count
+    unique_servers = len(set(m.get('source_server_id') for m in mappings))
+
     embed = discord.Embed(
         title="📋 Список маппингов ролей",
-        description=f"Всего маппингов: {len(mappings)}",
+        description=(
+            f"Всего: **{len(mappings)}** | "
+            f"Активных: **{enabled_count}** | "
+            f"Отключенных: **{disabled_count}** | "
+            f"Серверов: **{unique_servers}**"
+        ),
         color=COLOR_INFO,
         timestamp=datetime.now()
     )

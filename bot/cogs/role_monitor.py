@@ -3,11 +3,10 @@ Cog для мониторинга изменений ролей и автома�
 """
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 import asyncio
-from typing import Dict, Set, Optional
-from datetime import datetime, timedelta
+from typing import Dict, Optional
+from datetime import datetime
 
 from bot.core.sync_engine import SyncEngine
 from bot.core.role_mapper import RoleMapper
@@ -192,67 +191,6 @@ class RoleMonitorCog(commands.Cog):
         """Ожидание готовности бота перед запуском задачи"""
         await self.bot.wait_until_ready()
 
-    @commands.hybrid_command(name="toggle_autosync", description="Переключить автоматическую синхронизацию (вкл/выкл)")
-    @commands.has_permissions(administrator=True)
-    async def toggle_autosync(self, ctx: commands.Context):
-        """Переключить автоматическую синхронизацию (вкл/выкл)"""
-        # Проверяем текущее состояние
-        is_enabled = self.bot.config.is_auto_sync_enabled()
-
-        if is_enabled:
-            # Останавливаем задачу
-            self.process_pending_syncs.cancel()
-            status = "❌ Автоматическая синхронизация отключена"
-            logger.info(f"Автосинхронизация отключена пользователем {ctx.author}")
-        else:
-            # Запускаем задачу
-            self.process_pending_syncs.start()
-            status = "✅ Автоматическая синхронизация включена"
-            logger.info(f"Автосинхронизация включена пользователем {ctx.author}")
-
-        await ctx.send(status, ephemeral=True)
-
-    @commands.hybrid_command(name="sync_queue", description="Показать текущую очередь синхронизации")
-    @commands.has_permissions(administrator=True)
-    async def sync_queue(self, ctx: commands.Context):
-        """Показать текущую очередь синхронизации"""
-        if not self.pending_syncs:
-            await ctx.send("📭 Очередь синхронизации пуста", ephemeral=True)
-            return
-
-        now = datetime.now()
-        queue_info = ["📋 **Очередь синхронизации:**\n"]
-
-        for user_id, last_change in self.pending_syncs.items():
-            time_since = (now - last_change).total_seconds()
-            time_until = max(0, self.debounce_delay - time_since)
-
-            queue_info.append(
-                f"• Пользователь `{user_id}` - синхронизация через {time_until:.1f} сек"
-            )
-
-        await ctx.send("\n".join(queue_info), ephemeral=True)
-
-    @commands.hybrid_command(name="clear_sync_queue", description="Очистить очередь синхронизации")
-    @commands.has_permissions(administrator=True)
-    async def clear_sync_queue(self, ctx: commands.Context):
-        """Очистить очередь синхронизации"""
-        count = len(self.pending_syncs)
-        self.pending_syncs.clear()
-
-        await ctx.send(f"🗑️ Очередь синхронизации очищена ({count} пользователей удалено)", ephemeral=True)
-        logger.info(f"Очередь синхронизации очищена пользователем {ctx.author}")
-
-    @toggle_autosync.error
-    @sync_queue.error
-    @clear_sync_queue.error
-    async def monitor_command_error(self, ctx: commands.Context, error: Exception):
-        """Обработчик ошибок команд мониторинга"""
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ У вас нет прав администратора для использования этой команды.", ephemeral=True)
-        else:
-            logger.error(f"Ошибка в команде мониторинга: {error}", exc_info=True)
-            await ctx.send(f"❌ Произошла ошибка: {error}", ephemeral=True)
 
 
 async def setup(bot):

@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 import io
 
 from bot.ui.embeds import create_stats_embed, create_info_embed, create_error_embed, create_sync_history_page
@@ -39,11 +39,10 @@ class StatsCommandsCog(commands.Cog):
         if ctx.invoked_subcommand is None:
             help_text = (
                 "**Доступные команды статистики:**\n\n"
-                "`/rolestats overview` - Общая статистика\n"
+                "`/rolestats overview [дней]` - Общая статистика\n"
                 "`/rolestats user [@пользователь]` - Статистика пользователя\n"
                 "`/rolestats history [лимит] [пользователь]` - История синхронизаций\n"
-                "`/rolestats logs [лимит]` - Последние логи синхронизации\n"
-                "`/rolestats daily [дней]` - Ежедневная статистика\n"
+                "`/rolestats export [дней]` - Экспорт в CSV\n"
             )
             await ctx.send(embed=create_info_embed(help_text, "Команды статистики"), ephemeral=True)
 
@@ -88,12 +87,6 @@ class StatsCommandsCog(commands.Cog):
         target_user = user or ctx.author
 
         try:
-            # Получаем историю синхронизаций пользователя
-            assignments = await self.bot.db.get_user_role_assignments(
-                user_id=target_user.id,
-                limit=10
-            )
-
             # Получаем состояние синхронизации
             main_server_id = self.bot.config.get_main_server_id()
             sync_state = await self.bot.db.get_sync_state(
@@ -101,9 +94,15 @@ class StatsCommandsCog(commands.Cog):
                 main_server_id=main_server_id
             )
 
+            # Получаем последние сессии синхронизации
+            sessions = await self.bot.db.get_recent_sync_sessions(
+                limit=3,
+                user_id=target_user.id
+            )
+
             # Создаем embed
             embed = discord.Embed(
-                title=f"📊 Статистика синхронизации",
+                title="📊 Статистика синхронизации",
                 color=0x3498db,
                 timestamp=datetime.now()
             )
@@ -127,28 +126,64 @@ class StatsCommandsCog(commands.Cog):
             else:
                 embed.description = "Синхронизаций ещё не было."
 
-            if assignments:
+            # Показываем последние сессии
+            if sessions:
+                trigger_labels = {
+                    'button': 'Кнопка',
+                    'auto': 'Авто',
+                    'manual': 'Ручная',
+                    'command': 'Команда'
+                }
+
+                session_lines = []
+                for session in sessions:
+                    status_emoji = "✅" if session['success'] else "❌"
+
+                    try:
+                        ts = datetime.fromisoformat(session['timestamp'])
+                        time_str = f"<t:{int(ts.timestamp())}:R>"
+                    except (ValueError, TypeError):
+                        time_str = "???"
+
+                    trigger = trigger_labels.get(session['trigger_type'], session['trigger_type'])
+
+                    # Краткая сводка по ролям
+                    parts = []
+                    roles_added = session.get('roles_added', [])
+                    roles_removed = session.get('roles_removed', [])
+                    roles_failed = session.get('roles_failed', [])
+
+                    if roles_added:
+                        role_mentions = []
+                        for role_id in roles_added:
+                            role = ctx.guild.get_role(role_id)
+                            role_mentions.append(role.mention if role else f"`{role_id}`")
+                        parts.append(f"➕ {', '.join(role_mentions)}")
+                    if roles_removed:
+                        role_mentions = []
+                        for role_id in roles_removed:
+                            role = ctx.guild.get_role(role_id)
+                            role_mentions.append(role.mention if role else f"`{role_id}`")
+                        parts.append(f"➖ {', '.join(role_mentions)}")
+                    if roles_failed:
+                        role_mentions = []
+                        for role_id in roles_failed:
+                            role = ctx.guild.get_role(role_id)
+                            role_mentions.append(role.mention if role else f"`{role_id}`")
+                        parts.append(f"⚠️ {', '.join(role_mentions)}")
+
+                    if not parts:
+                        parts.append("Без изменений" if session['success'] else "Ошибка")
+
+                    parts_str = "\n  ".join(parts)
+                    line = f"{status_emoji} {time_str} — {trigger}\n  {parts_str}"
+                    session_lines.append(line)
+
                 embed.add_field(
-                    name="Последние назначения ролей",
-                    value=str(len(assignments)),
-                    inline=True
+                    name="Последние синхронизации",
+                    value="\n".join(session_lines),
+                    inline=False
                 )
-
-                # Показываем последние 5 назначений
-                recent_text = []
-                for assignment in assignments[:5]:
-                    timestamp = datetime.fromisoformat(assignment['assigned_timestamp'])
-                    recent_text.append(
-                        f"• <t:{int(timestamp.timestamp())}:R> - "
-                        f"Роль `{assignment['target_role_id']}` ({assignment['assignment_type']})"
-                    )
-
-                if recent_text:
-                    embed.add_field(
-                        name="Недавние назначения",
-                        value="\n".join(recent_text),
-                        inline=False
-                    )
 
             await ctx.send(embed=embed, ephemeral=True)
 
@@ -214,135 +249,6 @@ class StatsCommandsCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"Ошибка получения истории синхронизаций: {e}", exc_info=True)
-            await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
-
-    @role_stats.command(name="logs", description="Показать последние логи синхронизации")
-    @app_commands.describe(limit="Количество записей для отображения (по умолчанию 20, макс 100)")
-    async def recent_logs(self, ctx: commands.Context, limit: int = 20):
-        """Показать последние логи синхронизации"""
-        if limit > 100:
-            await ctx.send("⚠️ Максимальный лимит: 100 записей", ephemeral=True)
-            limit = 100
-
-        try:
-            # Получаем логи
-            logs = await self.bot.db.get_recent_logs(limit=limit)
-
-            if not logs:
-                await ctx.send(
-                    embed=create_info_embed(
-                        "Логи синхронизации отсутствуют.",
-                        "Нет данных"
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            # Создаем embed с логами
-            embed = discord.Embed(
-                title=f"📜 Последние {len(logs)} логов синхронизации",
-                color=0x3498db,
-                timestamp=datetime.now()
-            )
-
-            # Группируем логи по страницам (по 10 на странице)
-            page_size = 10
-            pages = []
-
-            for i in range(0, len(logs), page_size):
-                page_logs = logs[i:i+page_size]
-                page_embed = discord.Embed(
-                    title=f"📜 Логи синхронизации",
-                    color=0x3498db,
-                    timestamp=datetime.now()
-                )
-
-                log_text = []
-                for log in page_logs:
-                    timestamp = datetime.fromisoformat(log['timestamp'])
-                    status_emoji = "✅" if log['success'] else "❌"
-
-                    log_line = (
-                        f"{status_emoji} <t:{int(timestamp.timestamp())}:t> - "
-                        f"Пользователь `{log['user_id']}` - "
-                        f"{log['action_type']} ({log['trigger_type']})"
-                    )
-
-                    if log.get('error_message'):
-                        log_line += f"\n   └─ Ошибка: {log['error_message'][:50]}"
-
-                    log_text.append(log_line)
-
-                page_embed.description = "\n".join(log_text)
-                page_embed.set_footer(
-                    text=f"Страница {len(pages) + 1}/{(len(logs) - 1) // page_size + 1}"
-                )
-
-                pages.append(page_embed)
-
-            # Если только одна страница
-            if len(pages) == 1:
-                await ctx.send(embed=pages[0], ephemeral=True)
-            else:
-                # Используем пагинацию
-                view = PaginationView(pages)
-                await ctx.send(embed=pages[0], view=view, ephemeral=True)
-
-        except Exception as e:
-            logger.error(f"Ошибка получения логов: {e}", exc_info=True)
-            await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
-
-    @role_stats.command(name="daily", description="Показать ежедневную статистику")
-    @app_commands.describe(days="Количество дней (по умолчанию 7, макс 30)")
-    async def daily_stats(self, ctx: commands.Context, days: int = 7):
-        """Показать ежедневную статистику"""
-        if days > 30:
-            await ctx.send("⚠️ Максимальный период: 30 дней", ephemeral=True)
-            days = 30
-
-        try:
-            # Получаем ежедневную статистику
-            daily_stats = await self.bot.db.get_daily_statistics(days=days)
-
-            if not daily_stats:
-                await ctx.send(
-                    embed=create_info_embed(
-                        f"Нет данных за последние {days} дней.",
-                        "Статистика отсутствует"
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            # Создаем embed
-            embed = discord.Embed(
-                title=f"📅 Ежедневная статистика ({days} дней)",
-                color=0x3498db,
-                timestamp=datetime.now()
-            )
-
-            # Форматируем данные
-            stats_text = []
-            for stat in daily_stats:
-                date = stat['stat_date']
-                total = stat['total_syncs'] or 0
-                success = stat['successful_syncs'] or 0
-                failed = stat['failed_syncs'] or 0
-
-                success_rate = (success / total * 100) if total > 0 else 0
-
-                stats_text.append(
-                    f"**{date}**\n"
-                    f"  Синхронизаций: {total} (✅ {success}, ❌ {failed})\n"
-                    f"  Успешность: {success_rate:.1f}%"
-                )
-
-            embed.description = "\n\n".join(stats_text)
-
-            await ctx.send(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            logger.error(f"Ошибка получения ежедневной статистики: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
 
     @role_stats.command(name="export", description="Экспортировать статистику в CSV файл")
