@@ -36,7 +36,30 @@ def create_sync_result_embed(
         Embed с простым сообщением о результате
     """
     # Определяем статус и сообщение
-    if not result.success:
+    has_failed = len(result.roles_failed) > 0
+    has_added = len(result.roles_added) > 0
+
+    if has_failed and not has_added:
+        # Все роли не удалось выдать
+        title = "⚠️ Не удалось выдать роли"
+        description = "Не удалось выдать роли. Попробуйте ещё раз"
+        color = COLOR_WARNING
+    elif has_failed and has_added:
+        # Часть ролей выдана, часть нет
+        roles_text = []
+        for role_id in result.roles_added:
+            role = guild.get_role(role_id)
+            if role:
+                roles_text.append(role.mention)
+
+        if roles_text:
+            added_str = ', '.join(roles_text)
+            description = f"Выданы роли: {added_str}\n\nНе все роли удалось выдать. Попробуйте ещё раз"
+        else:
+            description = "Часть ролей выдана, но не все. Попробуйте ещё раз"
+        title = "⚠️ Выданы не все роли"
+        color = COLOR_WARNING
+    elif not result.success:
         title = "❌ Ошибка"
         description = "Не удалось получить роли. Попробуйте позже"
         color = COLOR_ERROR
@@ -297,6 +320,110 @@ def create_stats_embed(stats: Dict) -> discord.Embed:
     )
 
     embed.set_footer(text="Статистика за последние 30 дней")
+
+    return embed
+
+
+def create_sync_history_page(
+    sessions: List[Dict],
+    guild: discord.Guild,
+    page: int,
+    total_pages: int
+) -> discord.Embed:
+    """
+    Создать embed-страницу истории синхронизаций
+
+    Args:
+        sessions: Список сессий для этой страницы
+        guild: Объект сервера (для resolve ролей)
+        page: Номер текущей страницы (1-based)
+        total_pages: Общее количество страниц
+
+    Returns:
+        Embed с историей синхронизаций
+    """
+    embed = discord.Embed(
+        title="📜 История синхронизаций",
+        color=COLOR_INFO,
+        timestamp=datetime.now()
+    )
+
+    trigger_labels = {
+        'button': 'Кнопка',
+        'auto': 'Авто',
+        'manual': 'Ручная',
+        'command': 'Команда'
+    }
+
+    for session in sessions:
+        # Статус
+        status_emoji = "✅" if session['success'] else "❌"
+
+        # Время
+        try:
+            ts = datetime.fromisoformat(session['timestamp'])
+            time_str = f"<t:{int(ts.timestamp())}:R>"
+        except (ValueError, TypeError):
+            time_str = "???"
+
+        # Триггер
+        trigger = trigger_labels.get(session['trigger_type'], session['trigger_type'])
+
+        # Заголовок field
+        field_name = f"{status_emoji} <@{session['user_id']}> — {trigger} {time_str}"
+
+        # Тело field
+        lines = []
+
+        # Добавленные роли
+        roles_added = session.get('roles_added', [])
+        if roles_added:
+            role_mentions = []
+            for role_id in roles_added:
+                role = guild.get_role(role_id)
+                role_mentions.append(role.mention if role else f"`{role_id}`")
+            lines.append(f"➕ {', '.join(role_mentions)}")
+
+        # Удалённые роли
+        roles_removed = session.get('roles_removed', [])
+        if roles_removed:
+            role_mentions = []
+            for role_id in roles_removed:
+                role = guild.get_role(role_id)
+                role_mentions.append(role.mention if role else f"`{role_id}`")
+            lines.append(f"➖ {', '.join(role_mentions)}")
+
+        # Неудавшиеся роли
+        roles_failed = session.get('roles_failed', [])
+        if roles_failed:
+            role_mentions = []
+            for role_id in roles_failed:
+                role = guild.get_role(role_id)
+                role_mentions.append(role.mention if role else f"`{role_id}`")
+            lines.append(f"⚠️ Не выданы: {', '.join(role_mentions)}")
+
+        # Ошибки
+        errors = session.get('errors', [])
+        if errors:
+            error_text = errors[0][:100]
+            if len(errors) > 1:
+                error_text += f" (+{len(errors) - 1})"
+            lines.append(f"💬 {error_text}")
+
+        # Если ничего не произошло
+        if not lines:
+            if session['success']:
+                lines.append("Без изменений")
+            else:
+                lines.append("Ошибка синхронизации")
+
+        embed.add_field(
+            name=field_name,
+            value="\n".join(lines),
+            inline=False
+        )
+
+    embed.set_footer(text=f"Страница {page}/{total_pages}")
 
     return embed
 

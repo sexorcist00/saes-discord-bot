@@ -25,6 +25,7 @@ class SyncResult:
     user_id: int
     roles_added: List[int]
     roles_removed: List[int]
+    roles_failed: List[int]
     errors: List[str]
     timestamp: datetime
     source_servers: List[int]
@@ -95,6 +96,7 @@ class SyncEngine:
             user_id=user_id,
             roles_added=[],
             roles_removed=[],
+            roles_failed=[],
             errors=[],
             timestamp=datetime.now(),
             source_servers=[]
@@ -123,13 +125,26 @@ class SyncEngine:
                 raise UserNotFoundError(error_msg)
 
             # 3. Получаем все сервера и роли пользователя (один параллельный запрос)
-            mutual_guilds, user_roles_map = await self.get_user_roles_from_all_guilds(user_id)
+            mutual_guilds, user_roles_map, fetch_errors = await self.get_user_roles_from_all_guilds(user_id)
             logger.info(f"Пользователь найден на {len(mutual_guilds)} общих серверах")
 
-            if not mutual_guilds:
+            # Запоминаем ошибки получения данных с серверов
+            if fetch_errors:
+                result.errors.extend(fetch_errors)
+
+            if not mutual_guilds and not fetch_errors:
                 logger.info(f"Пользователь {user_id} не найден ни на одном из мониторимых серверов")
                 result.success = True
                 await self._log_sync_event(user_id, "sync_success", trigger_type, True)
+                return result
+
+            # Если не удалось получить данные ни с одного сервера из-за ошибок
+            if not mutual_guilds and fetch_errors:
+                result.success = False
+                await self._log_sync_event(
+                    user_id, "sync_failed", trigger_type, False,
+                    error_message="Не удалось получить данные с серверов"
+                )
                 return result
 
             # 4. Роли уже собраны в предыдущем шаге
@@ -145,13 +160,13 @@ class SyncEngine:
             result.current_roles = [role.id for role in main_member.roles if not role.is_default()]
 
             # 6. Определяем какие роли нужно добавить/удалить
-            roles_to_add, roles_to_remove = await self.calculate_role_changes(
+            roles_to_add, roles_to_remove, unmanageable_role_ids = await self.calculate_role_changes(
                 main_member,
                 target_role_ids
             )
 
             # 7. Применяем изменения
-            success = await self.apply_role_changes(
+            apply_success, actually_added, failed_to_add = await self.apply_role_changes(
                 main_member,
                 roles_to_add,
                 roles_to_remove,
@@ -159,26 +174,40 @@ class SyncEngine:
                 user_roles_map
             )
 
-            result.success = success
-            result.roles_added = [r.id for r in roles_to_add]
+            # Собираем все неудавшиеся роли
+            all_failed = [r.id for r in failed_to_add] + unmanageable_role_ids
+
+            result.roles_added = [r.id for r in actually_added]
             result.roles_removed = [r.id for r in roles_to_remove]
+            result.roles_failed = all_failed
+
+            # Успех только если нет ошибок получения данных и нет неудавшихся ролей
+            has_failures = len(all_failed) > 0 or len(fetch_errors) > 0
+            result.success = not has_failures
 
             # 8. Логируем результат
-            if success:
+            if result.success:
                 await self._log_sync_event(user_id, "sync_success", trigger_type, True)
                 await self.db.update_sync_state(user_id, main_server_id)
                 await self.db.update_statistics(
                     trigger_type=trigger_type,
                     success=True,
-                    roles_assigned=len(roles_to_add),
+                    roles_assigned=len(actually_added),
                     user_id=user_id
                 )
             else:
                 await self._log_sync_event(user_id, "sync_failed", trigger_type, False)
+                await self.db.update_statistics(
+                    trigger_type=trigger_type,
+                    success=False,
+                    roles_assigned=len(actually_added),
+                    user_id=user_id
+                )
 
             logger.info(
                 f"Синхронизация завершена для {user_id}: "
-                f"+{len(roles_to_add)} ролей, -{len(roles_to_remove)} ролей"
+                f"+{len(actually_added)} ролей, -{len(roles_to_remove)} ролей, "
+                f"не удалось: {len(all_failed)}"
             )
 
         except UserNotFoundError:
@@ -189,6 +218,21 @@ class SyncEngine:
             logger.error(error_msg, exc_info=True)
             result.errors.append(error_msg)
             await self._log_sync_event(user_id, "sync_failed", trigger_type, False, error_message=str(e))
+
+        # Записываем сессию синхронизации в БД
+        try:
+            await self.db.record_sync_session(
+                user_id=user_id,
+                trigger_type=trigger_type,
+                success=result.success,
+                roles_added=result.roles_added,
+                roles_removed=result.roles_removed,
+                roles_failed=result.roles_failed,
+                source_servers=result.source_servers,
+                errors=result.errors
+            )
+        except Exception as e:
+            logger.error(f"Ошибка записи сессии синхронизации: {e}", exc_info=True)
 
         return result
 
@@ -206,19 +250,19 @@ class SyncEngine:
 
         Returns:
             Member или None если не найден
+
+        Raises:
+            Exception: При transient-ошибках (сеть, rate limit и т.д.)
         """
         try:
             return await guild.fetch_member(user_id)
         except discord.NotFound:
             return None
-        except Exception as e:
-            logger.warning(f"Ошибка получения участника на сервере {guild.name}: {e}")
-            return None
 
     async def get_user_roles_from_all_guilds(
         self,
         user_id: int
-    ) -> Tuple[List[discord.Guild], Dict[int, List[int]]]:
+    ) -> Tuple[List[discord.Guild], Dict[int, List[int]], List[str]]:
         """
         Получить роли пользователя со всех серверов (параллельно)
 
@@ -226,7 +270,7 @@ class SyncEngine:
             user_id: ID пользователя
 
         Returns:
-            Кортеж (список серверов где найден, словарь {server_id: [role_ids]})
+            Кортеж (список серверов где найден, словарь {server_id: [role_ids]}, список ошибок)
         """
         main_server_id = self.config.get_main_server_id()
 
@@ -234,16 +278,24 @@ class SyncEngine:
         guilds_to_check = [g for g in self.bot.guilds if g.id != main_server_id]
 
         if not guilds_to_check:
-            return [], {}
+            return [], {}, []
 
         # Параллельно запрашиваем всех участников
         tasks = [self._fetch_member_safe(guild, user_id) for guild in guilds_to_check]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         mutual_guilds = []
         user_roles_map = {}
+        fetch_errors = []
 
-        for guild, member in zip(guilds_to_check, results):
+        for guild, result in zip(guilds_to_check, results):
+            if isinstance(result, Exception):
+                error_msg = f"Ошибка получения данных с сервера {guild.name}: {result}"
+                logger.warning(error_msg)
+                fetch_errors.append(error_msg)
+                continue
+
+            member = result
             if member is not None:
                 mutual_guilds.append(guild)
                 # Получаем все роли кроме @everyone
@@ -255,7 +307,7 @@ class SyncEngine:
                     )
 
         logger.debug(f"Пользователь найден на {len(mutual_guilds)} серверах (параллельный запрос)")
-        return mutual_guilds, user_roles_map
+        return mutual_guilds, user_roles_map, fetch_errors
 
     async def get_user_mutual_guilds(self, user_id: int) -> List[discord.Guild]:
         """
@@ -267,7 +319,7 @@ class SyncEngine:
         Returns:
             Список объектов Guild
         """
-        mutual_guilds, _ = await self.get_user_roles_from_all_guilds(user_id)
+        mutual_guilds, _, _ = await self.get_user_roles_from_all_guilds(user_id)
         return mutual_guilds
 
     async def get_user_roles_from_guilds(
@@ -333,7 +385,7 @@ class SyncEngine:
         self,
         member: discord.Member,
         target_role_ids: List[int]
-    ) -> Tuple[List[discord.Role], List[discord.Role]]:
+    ) -> Tuple[List[discord.Role], List[discord.Role], List[int]]:
         """
         Определить какие роли нужно добавить/удалить
 
@@ -342,7 +394,7 @@ class SyncEngine:
             target_role_ids: Список ID целевых ролей
 
         Returns:
-            Кортеж (роли_для_добавления, роли_для_удаления)
+            Кортеж (роли_для_добавления, роли_для_удаления, ID_ролей_которые_не_удалось_обработать)
         """
         # Получаем текущие роли пользователя (только управляемые ботом)
         current_role_ids = set(role.id for role in member.roles if not role.is_default())
@@ -357,6 +409,7 @@ class SyncEngine:
         # Преобразуем ID в объекты ролей
         roles_to_add = []
         roles_to_remove = []
+        unmanageable_roles = []
 
         # Получаем управляемые роли для добавления
         if roles_to_add_ids:
@@ -365,11 +418,12 @@ class SyncEngine:
                 list(roles_to_add_ids)
             )
             roles_to_add = manageable_add
+            unmanageable_roles = unmanageable_add
 
             if unmanageable_add:
                 logger.warning(
                     f"Не удалось добавить {len(unmanageable_add)} ролей "
-                    f"(нет прав или роли не найдены)"
+                    f"(нет прав или роли не найдены): {unmanageable_add}"
                 )
 
         # Получаем управляемые роли для удаления
@@ -390,10 +444,11 @@ class SyncEngine:
                 roles_to_remove = manageable_remove
 
         logger.debug(
-            f"Изменения ролей: +{len(roles_to_add)}, -{len(roles_to_remove)}"
+            f"Изменения ролей: +{len(roles_to_add)}, -{len(roles_to_remove)}, "
+            f"неуправляемых: {len(unmanageable_roles)}"
         )
 
-        return roles_to_add, roles_to_remove
+        return roles_to_add, roles_to_remove, unmanageable_roles
 
     async def apply_role_changes(
         self,
@@ -402,7 +457,7 @@ class SyncEngine:
         roles_to_remove: List[discord.Role],
         trigger_type: str,
         user_roles_map: Dict[int, List[int]]
-    ) -> bool:
+    ) -> Tuple[bool, List[discord.Role], List[discord.Role]]:
         """
         Применить изменения ролей к пользователю
 
@@ -414,14 +469,16 @@ class SyncEngine:
             user_roles_map: Карта ролей пользователя на других серверах
 
         Returns:
-            True если все изменения применены успешно
+            Кортеж (все_успешно, реально_добавленные, не_удалось_добавить)
         """
-        success = True
+        actually_added = []
+        failed_to_add = []
 
         # Добавляем роли
         for role in roles_to_add:
             try:
                 await member.add_roles(role, reason=f"Role sync ({trigger_type})")
+                actually_added.append(role)
                 logger.info(f"Добавлена роль {role.name} пользователю {member.id}")
 
                 # Логируем в БД
@@ -456,7 +513,7 @@ class SyncEngine:
             except discord.Forbidden:
                 error_msg = f"Нет прав для добавления роли {role.name}"
                 logger.error(error_msg)
-                success = False
+                failed_to_add.append(role)
                 await self.db.log_sync_event(
                     user_id=member.id,
                     action_type="role_added",
@@ -468,7 +525,7 @@ class SyncEngine:
             except Exception as e:
                 error_msg = f"Ошибка добавления роли {role.name}: {e}"
                 logger.error(error_msg, exc_info=True)
-                success = False
+                failed_to_add.append(role)
 
         # Удаляем роли
         for role in roles_to_remove:
@@ -489,13 +546,12 @@ class SyncEngine:
             except discord.Forbidden:
                 error_msg = f"Нет прав для удаления роли {role.name}"
                 logger.error(error_msg)
-                success = False
             except Exception as e:
                 error_msg = f"Ошибка удаления роли {role.name}: {e}"
                 logger.error(error_msg, exc_info=True)
-                success = False
 
-        return success
+        success = len(failed_to_add) == 0
+        return success, actually_added, failed_to_add
 
     async def sync_all_users(self, guild_id: Optional[int] = None) -> Dict[str, int]:
         """

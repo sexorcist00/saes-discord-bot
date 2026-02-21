@@ -80,6 +80,26 @@ CREATE TABLE IF NOT EXISTS statistics (
 );
 """
 
+CREATE_SYNC_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS sync_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    user_id INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL,
+    success BOOLEAN NOT NULL DEFAULT 1,
+    roles_added TEXT DEFAULT '[]',
+    roles_removed TEXT DEFAULT '[]',
+    roles_failed TEXT DEFAULT '[]',
+    source_servers TEXT DEFAULT '[]',
+    errors TEXT DEFAULT '[]'
+);
+"""
+
+CREATE_SYNC_SESSIONS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sync_sessions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sync_sessions(user_id);
+"""
+
 CREATE_ROLE_MAPPING_CACHE_TABLE = """
 CREATE TABLE IF NOT EXISTS role_mapping_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +151,12 @@ async def initialize_database(db_path: str) -> None:
 
             await db.execute(CREATE_STATISTICS_TABLE)
             logger.debug("Таблица statistics создана")
+
+            await db.execute(CREATE_SYNC_SESSIONS_TABLE)
+            for index_sql in CREATE_SYNC_SESSIONS_INDEXES.split(';'):
+                if index_sql.strip():
+                    await db.execute(index_sql)
+            logger.debug("Таблица sync_sessions создана")
 
             await db.execute(CREATE_ROLE_MAPPING_CACHE_TABLE)
             await db.execute(CREATE_ROLE_MAPPING_CACHE_INDEX)

@@ -2,6 +2,7 @@
 CRUD операции для работы с базой данных
 """
 
+import json
 import aiosqlite
 from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
@@ -322,6 +323,89 @@ class DatabaseOperations:
         """
         rows = await self._fetchall(query, (f'-{days} days',))
         return [dict(row) for row in rows]
+
+    # ============ Sync Sessions Operations ============
+
+    async def record_sync_session(
+        self,
+        user_id: int,
+        trigger_type: str,
+        success: bool,
+        roles_added: List[int],
+        roles_removed: List[int],
+        roles_failed: List[int],
+        source_servers: List[int],
+        errors: List[str]
+    ) -> None:
+        """
+        Записать сессию синхронизации
+
+        Args:
+            user_id: ID пользователя
+            trigger_type: Тип триггера (button/auto/manual)
+            success: Успешно ли завершена
+            roles_added: Список ID реально добавленных ролей
+            roles_removed: Список ID удалённых ролей
+            roles_failed: Список ID ролей которые не удалось выдать
+            source_servers: Список ID серверов-источников
+            errors: Список текстов ошибок
+        """
+        query = """
+        INSERT INTO sync_sessions (
+            user_id, trigger_type, success,
+            roles_added, roles_removed, roles_failed,
+            source_servers, errors
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        await self._execute(query, (
+            user_id, trigger_type, success,
+            json.dumps(roles_added),
+            json.dumps(roles_removed),
+            json.dumps(roles_failed),
+            json.dumps(source_servers),
+            json.dumps(errors)
+        ))
+        logger.debug(f"Записана сессия синхронизации для пользователя {user_id}")
+
+    async def get_recent_sync_sessions(
+        self,
+        limit: int = 50,
+        user_id: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Получить недавние сессии синхронизации
+
+        Args:
+            limit: Максимальное количество записей
+            user_id: Фильтр по пользователю (опционально)
+
+        Returns:
+            Список сессий с распарсенными JSON полями
+        """
+        query = "SELECT * FROM sync_sessions WHERE 1=1"
+        params = []
+
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        rows = await self._fetchall(query, tuple(params))
+
+        sessions = []
+        for row in rows:
+            session = dict(row)
+            # Парсим JSON поля
+            for field in ('roles_added', 'roles_removed', 'roles_failed', 'source_servers', 'errors'):
+                try:
+                    session[field] = json.loads(session[field])
+                except (json.JSONDecodeError, TypeError):
+                    session[field] = []
+            sessions.append(session)
+
+        return sessions
 
     # ============ Role Mapping Cache Operations ============
 

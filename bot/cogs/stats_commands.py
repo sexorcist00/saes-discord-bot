@@ -9,7 +9,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 import io
 
-from bot.ui.embeds import create_stats_embed, create_info_embed, create_error_embed
+from bot.ui.embeds import create_stats_embed, create_info_embed, create_error_embed, create_sync_history_page
 from bot.ui.buttons import PaginationView
 from bot.utils.logger import get_logger
 
@@ -41,6 +41,7 @@ class StatsCommandsCog(commands.Cog):
                 "**Доступные команды статистики:**\n\n"
                 "`/rolestats overview` - Общая статистика\n"
                 "`/rolestats user [@пользователь]` - Статистика пользователя\n"
+                "`/rolestats history [лимит] [пользователь]` - История синхронизаций\n"
                 "`/rolestats logs [лимит]` - Последние логи синхронизации\n"
                 "`/rolestats daily [дней]` - Ежедневная статистика\n"
             )
@@ -153,6 +154,66 @@ class StatsCommandsCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"Ошибка получения статистики пользователя: {e}", exc_info=True)
+            await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
+
+    @role_stats.command(name="history", description="Показать историю синхронизаций с деталями")
+    @app_commands.describe(
+        limit="Количество записей (по умолчанию 20, макс 100)",
+        user="Фильтр по пользователю (опционально)"
+    )
+    async def sync_history(
+        self,
+        ctx: commands.Context,
+        limit: int = 20,
+        user: Optional[discord.User] = None
+    ):
+        """Показать историю синхронизаций с ролями, ошибками и статусами"""
+        if limit > 100:
+            await ctx.send("Максимальный лимит: 100 записей", ephemeral=True)
+            limit = 100
+
+        try:
+            user_id = user.id if user else None
+            sessions = await self.bot.db.get_recent_sync_sessions(limit=limit, user_id=user_id)
+
+            if not sessions:
+                title = "Нет данных"
+                if user:
+                    msg = f"История синхронизаций для {user.mention} отсутствует."
+                else:
+                    msg = "История синхронизаций отсутствует."
+                await ctx.send(embed=create_info_embed(msg, title), ephemeral=True)
+                return
+
+            # Разбиваем на страницы по 5 сессий
+            page_size = 5
+            pages = []
+            total_pages = (len(sessions) - 1) // page_size + 1
+
+            for i in range(0, len(sessions), page_size):
+                page_sessions = sessions[i:i + page_size]
+                page_num = i // page_size + 1
+                page_embed = create_sync_history_page(
+                    sessions=page_sessions,
+                    guild=ctx.guild,
+                    page=page_num,
+                    total_pages=total_pages
+                )
+                if user:
+                    page_embed.set_author(
+                        name=f"Фильтр: {user.display_name}",
+                        icon_url=user.display_avatar.url
+                    )
+                pages.append(page_embed)
+
+            if len(pages) == 1:
+                await ctx.send(embed=pages[0], ephemeral=True)
+            else:
+                view = PaginationView(pages)
+                await ctx.send(embed=pages[0], view=view, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Ошибка получения истории синхронизаций: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
 
     @role_stats.command(name="logs", description="Показать последние логи синхронизации")
