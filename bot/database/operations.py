@@ -72,6 +72,108 @@ class DatabaseOperations:
         async with db.execute(query, params) as cursor:
             return await cursor.fetchall()
 
+    # ============ Batch Operations ============
+
+    async def execute_batch(self, operations: List[tuple]) -> None:
+        """
+        Выполнить пакет операций в одной транзакции (один commit).
+
+        Args:
+            operations: Список кортежей (op_type, params)
+                op_type: 'log_sync_event', 'record_role_assignment',
+                         'update_sync_state', 'update_statistics', 'record_sync_session'
+        """
+        if not operations:
+            return
+
+        db = await self._get_connection()
+
+        try:
+            for op_type, params in operations:
+                if op_type == "log_sync_event":
+                    user_id, action_type, trigger_type, success, *rest = params
+                    target_server_id = rest[0] if len(rest) > 0 else None
+                    target_role_id = rest[1] if len(rest) > 1 else None
+                    error_message = rest[2] if len(rest) > 2 else None
+                    await db.execute(
+                        """INSERT INTO sync_logs (
+                            user_id, action_type, trigger_type, success,
+                            source_server_id, source_role_id,
+                            target_server_id, target_role_id, error_message
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (user_id, action_type, trigger_type, success,
+                         None, None, target_server_id, target_role_id, error_message)
+                    )
+
+                elif op_type == "record_role_assignment":
+                    await db.execute(
+                        """INSERT INTO role_assignments (
+                            user_id, source_server_id, source_role_id,
+                            target_server_id, target_role_id, assignment_type
+                        ) VALUES (?, ?, ?, ?, ?, ?)""",
+                        params
+                    )
+
+                elif op_type == "update_sync_state":
+                    user_id, main_server_id = params
+                    await db.execute(
+                        """INSERT INTO sync_state (user_id, main_server_id, last_sync_timestamp, sync_count)
+                        VALUES (?, ?, CURRENT_TIMESTAMP, 1)
+                        ON CONFLICT(user_id, main_server_id) DO UPDATE SET
+                            last_sync_timestamp = CURRENT_TIMESTAMP,
+                            sync_count = sync_count + 1""",
+                        (user_id, main_server_id)
+                    )
+
+                elif op_type == "update_statistics":
+                    trigger_type, success, roles_assigned, user_id = params
+                    today = date.today().isoformat()
+                    button_inc = 1 if trigger_type == "button" else 0
+                    auto_inc = 1 if trigger_type == "auto" else 0
+                    manual_inc = 1 if trigger_type == "manual" else 0
+                    success_inc = 1 if success else 0
+                    failed_inc = 0 if success else 1
+                    await db.execute(
+                        """INSERT INTO statistics (
+                            stat_date, total_syncs, button_syncs, auto_syncs, manual_syncs,
+                            successful_syncs, failed_syncs, unique_users_synced, total_roles_assigned
+                        ) VALUES (?, 1, ?, ?, ?, ?, ?, 0, ?)
+                        ON CONFLICT(stat_date) DO UPDATE SET
+                            total_syncs = total_syncs + 1,
+                            button_syncs = button_syncs + ?,
+                            auto_syncs = auto_syncs + ?,
+                            manual_syncs = manual_syncs + ?,
+                            successful_syncs = successful_syncs + ?,
+                            failed_syncs = failed_syncs + ?,
+                            total_roles_assigned = total_roles_assigned + ?""",
+                        (today, button_inc, auto_inc, manual_inc, success_inc, failed_inc, roles_assigned,
+                         button_inc, auto_inc, manual_inc, success_inc, failed_inc, roles_assigned)
+                    )
+
+                elif op_type == "record_sync_session":
+                    user_id, trigger_type, success, roles_added, roles_removed, roles_failed, source_servers, errors = params
+                    await db.execute(
+                        """INSERT INTO sync_sessions (
+                            user_id, trigger_type, success,
+                            roles_added, roles_removed, roles_failed,
+                            source_servers, errors
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (user_id, trigger_type, success,
+                         json.dumps(roles_added), json.dumps(roles_removed),
+                         json.dumps(roles_failed), json.dumps(source_servers), json.dumps(errors))
+                    )
+
+            await db.commit()
+            logger.info(f"Пакетная операция: выполнено {len(operations)} запросов")
+
+        except Exception as e:
+            logger.error(f"Ошибка пакетной операции БД: {e}", exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            raise DatabaseError(f"Batch database error: {e}")
+
     # ============ Sync State Operations ============
 
     async def update_sync_state(self, user_id: int, main_server_id: int) -> None:
@@ -204,7 +306,8 @@ class DatabaseOperations:
         self,
         limit: int = 100,
         user_id: Optional[int] = None,
-        action_type: Optional[str] = None
+        action_type: Optional[str] = None,
+        days: Optional[int] = None
     ) -> List[Dict]:
         """
         Получить недавние логи
@@ -213,12 +316,17 @@ class DatabaseOperations:
             limit: Максимальное количество записей
             user_id: Фильтр по ID пользователя
             action_type: Фильтр по типу действия
+            days: Фильтр по количеству дней (None = без ограничения)
 
         Returns:
             Список логов
         """
         query = "SELECT * FROM sync_logs WHERE 1=1"
         params = []
+
+        if days is not None:
+            query += " AND timestamp >= datetime('now', ?)"
+            params.append(f'-{days} days')
 
         if user_id:
             query += " AND user_id = ?"

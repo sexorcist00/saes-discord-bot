@@ -234,7 +234,7 @@ def create_mapping_list_embed(
         timestamp=datetime.now()
     )
 
-    for mapping in page_mappings:
+    for i, mapping in enumerate(page_mappings):
         status = "✅" if mapping.get('enabled', True) else "❌"
         field_value = (
             f"**ID:** `{mapping['mapping_id']}`\n"
@@ -247,7 +247,7 @@ def create_mapping_list_embed(
             field_value += f"\n**Описание:** {mapping['description']}"
 
         embed.add_field(
-            name=f"Маппинг #{start_idx + page_mappings.index(mapping) + 1}",
+            name=f"Маппинг #{start_idx + i + 1}",
             value=field_value,
             inline=False
         )

@@ -245,7 +245,8 @@ class StatsCommandsCog(commands.Cog):
                 await ctx.send(embed=pages[0], ephemeral=True)
             else:
                 view = PaginationView(pages)
-                await ctx.send(embed=pages[0], view=view, ephemeral=True)
+                msg = await ctx.send(embed=pages[0], view=view, ephemeral=True)
+                view.message = msg
 
         except Exception as e:
             logger.error(f"Ошибка получения истории синхронизаций: {e}", exc_info=True)
@@ -257,8 +258,8 @@ class StatsCommandsCog(commands.Cog):
     async def export_stats(self, ctx: commands.Context, days: int = 30):
         """Экспортировать статистику в CSV файл"""
         try:
-            # Получаем все логи за период
-            logs = await self.bot.db.get_recent_logs(limit=10000)
+            # Получаем логи за указанный период
+            logs = await self.bot.db.get_recent_logs(limit=10000, days=days)
 
             if not logs:
                 await ctx.send(

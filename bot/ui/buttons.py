@@ -139,6 +139,7 @@ class PaginationView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.pages = pages
         self.current_page = 0
+        self.message: Optional[discord.Message] = None
 
         # Кнопки навигации
         self.first_button = PaginationButton("⏮️", discord.ButtonStyle.secondary, "first_page")
@@ -201,7 +202,12 @@ class PaginationView(discord.ui.View):
 
     async def on_timeout(self):
         """Обработчик истечения времени"""
-        # Отключаем все кнопки при истечении времени
         for item in self.children:
             item.disabled = True
+        # Обновляем сообщение в Discord чтобы кнопки отображались как отключённые
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
         self.stop()

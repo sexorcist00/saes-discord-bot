@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional
 import asyncio
+import time
 
 from bot.core.sync_engine import SyncEngine
 from bot.core.role_mapper import RoleMapper
@@ -22,6 +23,37 @@ from bot.utils.logger import get_logger
 from bot.utils.validators import validate_server_id, validate_role_id
 
 logger = get_logger("cogs.admin_commands")
+
+
+class _ConfirmSyncView(discord.ui.View):
+    """View с кнопками подтверждения/отмены массовой синхронизации"""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Подтвердить", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Эта кнопка не для вас.", ephemeral=True)
+            return
+        self.confirmed = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Эта кнопка не для вас.", ephemeral=True)
+            return
+        self.confirmed = False
+        await interaction.response.defer()
+        self.stop()
+
+    async def on_timeout(self):
+        self.confirmed = False
+        self.stop()
 
 
 class AdminCommandsCog(commands.Cog):
@@ -105,45 +137,94 @@ class AdminCommandsCog(commands.Cog):
         non_bot_members = [m for m in guild.members if not m.bot]
         member_count = len(non_bot_members)
 
+        # Кнопка подтверждения
+        confirm_view = _ConfirmSyncView(ctx.author.id)
         confirm_msg = await ctx.send(
             embed=create_info_embed(
                 f"Вы собираетесь синхронизировать **{member_count}** пользователей.\n"
-                f"Это может занять некоторое время.\n\n"
-                f"Продолжить? Напишите `да` для подтверждения (30 сек).",
+                f"Это может занять некоторое время.",
                 "Подтверждение массовой синхронизации"
+            ),
+            view=confirm_view,
+            ephemeral=True
+        )
+
+        await confirm_view.wait()
+
+        if not confirm_view.confirmed:
+            try:
+                await confirm_msg.edit(
+                    embed=create_info_embed("Массовая синхронизация отменена.", "Отменено"),
+                    view=None
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            await confirm_msg.edit(view=None)
+        except Exception:
+            pass
+
+        # Выполняем массовую синхронизацию
+        progress_msg = await ctx.send(
+            embed=create_info_embed(
+                f"**Прогресс:** 0/{member_count} (0%)\n"
+                f"`{'░' * 20}`\n\n"
+                f"Предзагрузка участников...",
+                "Массовая синхронизация..."
             ),
             ephemeral=True
         )
 
-        def check(m):
-            return m.author == ctx.author and m.channel == ctx.channel
-
         try:
-            msg = await self.bot.wait_for('message', check=check, timeout=30.0)
-            if msg.content.lower() not in ['да', 'yes', 'y', 'д']:
-                await ctx.send("❌ Массовая синхронизация отменена.", ephemeral=True)
-                return
-        except asyncio.TimeoutError:
-            await ctx.send("⏱️ Время ожидания истекло. Массовая синхронизация отменена.", ephemeral=True)
-            return
+            last_update_time = time.monotonic()
 
-        # Выполняем массовую синхронизацию
-        progress_msg = await ctx.send(
-            embed=create_info_embed("⏳ Начинаем массовую синхронизацию...", "В процессе"),
-            ephemeral=True
-        )
+            async def progress_callback(processed: int, total: int, stats: dict):
+                nonlocal last_update_time
+                now = time.monotonic()
+                # Обновляем embed не чаще раза в 5 секунд (или в конце)
+                if now - last_update_time < 5 and processed < total:
+                    return
+                last_update_time = now
 
-        try:
-            stats = await self.sync_engine.sync_all_users(guild_id=main_server_id)
+                percent = int(processed / total * 100) if total > 0 else 0
+                bar_filled = percent // 5
+                progress_bar = "\u2588" * bar_filled + "\u2591" * (20 - bar_filled)
 
-            # Отправляем результаты
-            result_text = (
-                f"**Результаты массовой синхронизации:**\n\n"
-                f"✅ Успешно: {stats.get('success', 0)}\n"
-                f"❌ Ошибок: {stats.get('failed', 0)}\n"
-                f"⏭️ Пропущено (боты): {stats.get('skipped', 0)}\n"
-                f"📊 Всего обработано: {stats.get('total', 0)}"
+                progress_embed = create_info_embed(
+                    f"**Прогресс:** {processed}/{total} ({percent}%)\n"
+                    f"`{progress_bar}`\n\n"
+                    f"\u2705 Успешно: {stats.get('success', 0)}\n"
+                    f"\u274c Ошибок: {stats.get('failed', 0)}\n"
+                    f"\u2796 Без изменений: {stats.get('no_changes', 0)}",
+                    "Массовая синхронизация..."
+                )
+                try:
+                    await progress_msg.edit(embed=progress_embed)
+                except Exception:
+                    pass
+
+            stats = await self.sync_engine.sync_all_users(
+                guild_id=main_server_id,
+                progress_callback=progress_callback
             )
+
+            # Финальный результат
+            result_lines = [
+                f"**Результаты массовой синхронизации:**\n",
+                f"\u2705 Успешно: {stats.get('success', 0)}",
+                f"\u274c Ошибок: {stats.get('failed', 0)}",
+                f"\u2796 Без изменений: {stats.get('no_changes', 0)}",
+                f"\u23ed\ufe0f Пропущено (боты): {stats.get('skipped', 0)}",
+                f"\ud83d\udcca Всего обработано: {stats.get('total', 0)}"
+            ]
+            if stats.get('db_errors', 0) > 0:
+                result_lines.append(
+                    f"\n\u26a0\ufe0f Ошибки записи в БД: {stats['db_errors']} "
+                    f"(часть данных может быть не сохранена)"
+                )
+            result_text = "\n".join(result_lines)
 
             await progress_msg.edit(
                 embed=create_success_embed(result_text, "Массовая синхронизация завершена")
