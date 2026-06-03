@@ -33,6 +33,9 @@ class SyncResult:
     source_roles_found: Optional[Dict[int, List[int]]] = None  # {server_id: [role_ids]}
     target_roles_calculated: Optional[List[int]] = None  # Целевые роли которые должны быть
     current_roles: Optional[List[int]] = None  # Текущие роли на главном сервере
+    # На скольких source-серверах бот вообще нашёл пользователя (независимо от ролей).
+    # Нужно, чтобы отличить "бота нет рядом с тобой" от "роли не настроены в маппинге".
+    mutual_guilds_found: int = 0
 
     def __post_init__(self):
         """Установить timestamp если не задан"""
@@ -143,6 +146,7 @@ class SyncEngine:
                 mutual_guilds, user_roles_map, fetch_errors = await self.get_user_roles_from_all_guilds(user_id)
 
             logger.info(f"Пользователь найден на {len(mutual_guilds)} общих серверах")
+            result.mutual_guilds_found = len(mutual_guilds)
 
             # Запоминаем ошибки получения данных с серверов
             if fetch_errors:
@@ -171,6 +175,13 @@ class SyncEngine:
             target_role_ids = await self.calculate_target_roles(user_roles_map)
             result.target_roles_calculated = target_role_ids
             logger.info(f"Рассчитано {len(target_role_ids)} целевых ролей для назначения")
+
+            # Диагностический лог: какие source-роли нашли и во что они смаппились.
+            # Помогает разбирать жалобы "есть роль, но пишет что нет нужных".
+            logger.info(
+                f"Диагностика синка {user_id}: "
+                f"source_roles={user_roles_map}, target_roles={target_role_ids}"
+            )
 
             # Сохраняем текущие роли пользователя на главном сервере
             result.current_roles = [role.id for role in main_member.roles if not role.is_default()]
