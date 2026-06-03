@@ -329,6 +329,14 @@ def create_stats_embed(stats: Dict) -> discord.Embed:
         inline=True
     )
 
+    # Уникальные пользователи
+    unique_users = stats.get('unique_users_synced', 0) or 0
+    embed.add_field(
+        name="Уникальных пользователей",
+        value=f"**{unique_users}**",
+        inline=True
+    )
+
     embed.set_footer(text="Статистика за последние 30 дней")
 
     return embed

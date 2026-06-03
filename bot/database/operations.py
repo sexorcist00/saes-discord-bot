@@ -422,7 +422,23 @@ class DatabaseOperations:
         WHERE stat_date >= date('now', ?)
         """
         row = await self._fetchone(query, (f'-{days} days',))
-        return dict(row) if row else {}
+        result = dict(row) if row else {}
+
+        # unique_users_synced нельзя корректно инкрементировать в statistics
+        # (upsert не знает, был ли пользователь уже учтён сегодня), поэтому
+        # считаем уникальных пользователей на чтении из sync_sessions —
+        # там одна запись на каждую синхронизацию.
+        unique_query = """
+        SELECT COUNT(DISTINCT user_id) AS unique_users_synced
+        FROM sync_sessions
+        WHERE timestamp >= datetime('now', ?)
+        """
+        unique_row = await self._fetchone(unique_query, (f'-{days} days',))
+        result['unique_users_synced'] = (
+            unique_row['unique_users_synced'] if unique_row else 0
+        )
+
+        return result
 
     async def get_daily_statistics(self, days: int = 7) -> List[Dict]:
         """
