@@ -40,9 +40,8 @@ class RoleMonitorCog(commands.Cog):
         """Вызывается когда Cog загружается"""
         logger.info("RoleMonitorCog загружен")
 
-        # Создаем RoleMapper и SyncEngine
-        self.role_mapper = RoleMapper(self.bot.config, self.bot.db)
-        await self.role_mapper.initialize()
+        # Используем общий RoleMapper бота
+        self.role_mapper = self.bot.role_mapper
 
         self.sync_engine = SyncEngine(
             bot=self.bot,
@@ -72,8 +71,14 @@ class RoleMonitorCog(commands.Cog):
             before: Состояние до изменения
             after: Состояние после изменения
         """
-        # Игнорируем если автосинхронизация отключена
+        # Игнорируем если автосинхронизация отключена в конфиге
         if not self.bot.config.is_auto_sync_enabled():
+            return
+
+        # Игнорируем если фоновый обработчик очереди не запущен
+        # (например, выключен командой /roleadmin autosync).
+        # Иначе pending_syncs растёт без обработки — утечка памяти.
+        if not self.process_pending_syncs.is_running():
             return
 
         # Игнорируем ботов

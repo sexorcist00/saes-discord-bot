@@ -3,6 +3,7 @@ CRUD операции для работы с базой данных
 """
 
 import json
+import asyncio
 import aiosqlite
 from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
@@ -24,6 +25,9 @@ class DatabaseOperations:
         """
         self.db_path = db_path
         self._connection: Optional[aiosqlite.Connection] = None
+        # Сериализует операции записи (execute + commit), чтобы commit одной
+        # корутины не зафиксировал незавершённую запись другой.
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Установить постоянное подключение к БД"""
@@ -53,8 +57,9 @@ class DatabaseOperations:
         """Выполнить SQL запрос"""
         try:
             db = await self._get_connection()
-            cursor = await db.execute(query, params)
-            await db.commit()
+            async with self._write_lock:
+                cursor = await db.execute(query, params)
+                await db.commit()
             return cursor
         except Exception as e:
             logger.error(f"Ошибка выполнения запроса: {e}", exc_info=True)
@@ -89,7 +94,21 @@ class DatabaseOperations:
         db = await self._get_connection()
 
         try:
-            for op_type, params in operations:
+            async with self._write_lock:
+                await self._run_batch_operations(db, operations)
+            logger.info(f"Пакетная операция: выполнено {len(operations)} запросов")
+
+        except Exception as e:
+            logger.error(f"Ошибка пакетной операции БД: {e}", exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            raise DatabaseError(f"Batch database error: {e}")
+
+    async def _run_batch_operations(self, db: aiosqlite.Connection, operations: List[tuple]) -> None:
+        """Выполнить операции пакета внутри уже захваченного write-lock."""
+        for op_type, params in operations:
                 if op_type == "log_sync_event":
                     user_id, action_type, trigger_type, success, *rest = params
                     target_server_id = rest[0] if len(rest) > 0 else None
@@ -163,16 +182,7 @@ class DatabaseOperations:
                          json.dumps(roles_failed), json.dumps(source_servers), json.dumps(errors))
                     )
 
-            await db.commit()
-            logger.info(f"Пакетная операция: выполнено {len(operations)} запросов")
-
-        except Exception as e:
-            logger.error(f"Ошибка пакетной операции БД: {e}", exc_info=True)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            raise DatabaseError(f"Batch database error: {e}")
+        await db.commit()
 
     # ============ Sync State Operations ============
 

@@ -1,4 +1,7 @@
 # Environment
+.env
+.env.*
+!.env.example
 venv/
 env/
 ENV/

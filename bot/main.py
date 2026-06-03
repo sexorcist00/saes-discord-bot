@@ -46,6 +46,9 @@ class RoleSyncBot(commands.Bot):
         # Инициализируем database operations
         self.db = None
 
+        # Общий RoleMapper для всех cogs (создаётся в setup_hook)
+        self.role_mapper = None
+
         # Флаг готовности
         self.is_ready = False
 
@@ -65,6 +68,13 @@ class RoleSyncBot(commands.Bot):
 
             # Кешируем маппинги ролей в БД
             await self._cache_role_mappings()
+
+            # Создаём единый RoleMapper, общий для всех cogs.
+            # Так add/remove/reload маппингов из одной команды видят все компоненты.
+            from bot.core.role_mapper import RoleMapper
+            self.role_mapper = RoleMapper(self.config, self.db)
+            await self.role_mapper.initialize()
+            logger.info("Общий RoleMapper инициализирован")
 
         except Exception as e:
             logger.error(f"Ошибка инициализации базы данных: {e}", exc_info=True)

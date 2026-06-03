@@ -90,7 +90,7 @@ def create_sync_result_embed(
         color = COLOR_SUCCESS
     else:
         # Нет изменений
-        if len(result.target_roles_calculated) == 0:
+        if len(result.target_roles_calculated or []) == 0:
             title = "⚠️ Нет ролей"
             description = "У вас нет нужных ролей в Discord сервере вашей фракции"
             color = COLOR_WARNING

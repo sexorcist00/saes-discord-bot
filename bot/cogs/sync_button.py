@@ -39,11 +39,8 @@ class SyncButtonCog(commands.Cog):
         """Вызывается когда Cog загружается"""
         logger.info("SyncButtonCog загружен")
 
-        # Создаем SyncEngine
-        from bot.core.role_mapper import RoleMapper
-
-        self.role_mapper = RoleMapper(self.bot.config, self.bot.db)
-        await self.role_mapper.initialize()
+        # Используем общий RoleMapper бота
+        self.role_mapper = self.bot.role_mapper
 
         self.sync_engine = SyncEngine(
             bot=self.bot,

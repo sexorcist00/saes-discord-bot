@@ -182,7 +182,7 @@ class SyncEngine:
             )
 
             # 7. Применяем изменения
-            apply_success, actually_added, failed_to_add = await self.apply_role_changes(
+            apply_success, actually_added, failed_to_add, actually_removed = await self.apply_role_changes(
                 main_member,
                 roles_to_add,
                 roles_to_remove,
@@ -195,11 +195,12 @@ class SyncEngine:
             all_failed = [r.id for r in failed_to_add] + unmanageable_role_ids
 
             result.roles_added = [r.id for r in actually_added]
-            result.roles_removed = [r.id for r in roles_to_remove]
+            result.roles_removed = [r.id for r in actually_removed]
             result.roles_failed = all_failed
 
-            # Успех только если нет ошибок получения данных и нет неудавшихся ролей
-            has_failures = len(all_failed) > 0 or len(fetch_errors) > 0
+            # Успех только если нет ошибок получения данных, нет неудавшихся ролей
+            # и снятие ролей (если требовалось) прошло успешно
+            has_failures = len(all_failed) > 0 or len(fetch_errors) > 0 or not apply_success
             result.success = not has_failures
 
             # 8. Логируем результат
@@ -491,7 +492,7 @@ class SyncEngine:
         user_roles_map: Dict[int, List[int]],
         *,
         batch_db_ops: Optional[list] = None
-    ) -> Tuple[bool, List[discord.Role], List[discord.Role]]:
+    ) -> Tuple[bool, List[discord.Role], List[discord.Role], List[discord.Role]]:
         """
         Применить изменения ролей к пользователю
 
@@ -504,7 +505,7 @@ class SyncEngine:
             batch_db_ops: Если передан — складывать DB-операции туда вместо немедленного выполнения
 
         Returns:
-            Кортеж (все_успешно, реально_добавленные, не_удалось_добавить)
+            Кортеж (все_успешно, реально_добавленные, не_удалось_добавить, реально_снятые)
         """
         actually_added = []
         failed_to_add = []
@@ -611,8 +612,12 @@ class SyncEngine:
                         target_server_id=member.guild.id, target_role_id=role.id
                     )
 
-        success = len(failed_to_add) == 0
-        return success, actually_added, failed_to_add
+        # Реально снятые роли — только если batch-удаление прошло успешно
+        actually_removed = list(roles_to_remove) if removal_success else []
+
+        # Успех только если все добавления прошли И (нечего снимать ИЛИ снятие удалось)
+        success = len(failed_to_add) == 0 and (not roles_to_remove or removal_success)
+        return success, actually_added, failed_to_add, actually_removed
 
     def _get_roles_from_cache(
         self,
