@@ -639,3 +639,68 @@ class DatabaseOperations:
         query = "DELETE FROM role_mapping_cache"
         await self._execute(query)
         logger.info("Кеш маппингов очищен")
+
+    # ============ ObjMapper: авторизация скрипта ============
+
+    async def create_objmapper_token(self, user_id: str, token: str, expires_at: str) -> None:
+        """Сохранить 6-значный токен привязки ObjMapper"""
+        query = """
+        INSERT INTO objmapper_link_tokens (discord_user_id, token, expires_at, is_used)
+        VALUES (?, ?, ?, 0)
+        """
+        await self._execute(query, (str(user_id), token, expires_at))
+
+    async def get_objmapper_token(self, token: str) -> Optional[Dict]:
+        """Получить запись токена привязки по значению"""
+        query = "SELECT * FROM objmapper_link_tokens WHERE token = ?"
+        row = await self._fetchone(query, (token,))
+        return dict(row) if row else None
+
+    async def mark_objmapper_token_used(self, token: str) -> None:
+        """Пометить токен привязки как использованный (одноразовый)"""
+        query = "UPDATE objmapper_link_tokens SET is_used = 1 WHERE token = ?"
+        await self._execute(query, (token,))
+
+    async def upsert_objmapper_link(self, user_id: str, nick: str, auth_token: str) -> None:
+        """
+        Создать/обновить привязку Discord-аккаунт ↔ SAMP-ник.
+
+        Ник уникален: повторная привязка того же ника перезаписывает auth_token
+        и владельца. Старый auth_token того же владельца удаляется, чтобы у одного
+        Discord-аккаунта не плодились параллельные токены на разные ники.
+        """
+        async with self._write_lock:
+            db = await self._get_connection()
+            # Убираем прежние привязки этого Discord-аккаунта (один аккаунт — один ник)
+            await db.execute(
+                "DELETE FROM objmapper_auth_links WHERE discord_user_id = ?",
+                (str(user_id),),
+            )
+            await db.execute(
+                """
+                INSERT INTO objmapper_auth_links
+                    (discord_user_id, samp_nick, auth_token, last_seen_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(samp_nick) DO UPDATE SET
+                    discord_user_id = excluded.discord_user_id,
+                    auth_token = excluded.auth_token,
+                    last_seen_at = CURRENT_TIMESTAMP
+                """,
+                (str(user_id), nick, auth_token),
+            )
+            await db.commit()
+
+    async def get_objmapper_link_by_token(self, auth_token: str) -> Optional[Dict]:
+        """Получить привязку по постоянному auth_token (Bearer)"""
+        query = "SELECT * FROM objmapper_auth_links WHERE auth_token = ?"
+        row = await self._fetchone(query, (auth_token,))
+        return dict(row) if row else None
+
+    async def touch_objmapper_link(self, auth_token: str, script_version: Optional[str]) -> None:
+        """Обновить last_seen_at и версию скрипта при успешной валидации"""
+        query = """
+        UPDATE objmapper_auth_links
+        SET last_seen_at = CURRENT_TIMESTAMP, script_version = ?
+        WHERE auth_token = ?
+        """
+        await self._execute(query, (script_version, auth_token))

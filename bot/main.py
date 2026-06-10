@@ -49,6 +49,9 @@ class RoleSyncBot(commands.Bot):
         # Общий RoleMapper для всех cogs (создаётся в setup_hook)
         self.role_mapper = None
 
+        # HTTP API авторизации ObjMapper (aiohttp runner, создаётся в setup_hook)
+        self.objmapper_api_runner = None
+
         # Флаг готовности
         self.is_ready = False
 
@@ -86,6 +89,18 @@ class RoleSyncBot(commands.Bot):
         await self.load_extension("bot.cogs.admin_commands")
         await self.load_extension("bot.cogs.stats_commands")
         logger.info("Все cogs загружены успешно")
+
+        # ObjMapper: команда выдачи токена + HTTP API авторизации (опционально)
+        if self.config.is_objmapper_enabled():
+            try:
+                await self.load_extension("bot.cogs.objmapper_commands")
+                from bot.api.server import start_api
+                self.objmapper_api_runner = await start_api(self)
+                logger.info("ObjMapper: cog и HTTP API инициализированы")
+            except Exception as e:
+                logger.error(f"Ошибка инициализации ObjMapper API: {e}", exc_info=True)
+        else:
+            logger.info("ObjMapper API отключён в конфиге")
 
         logger.info("Setup hook завершен")
 
@@ -192,6 +207,14 @@ class RoleSyncBot(commands.Bot):
     async def close(self):
         """Корректное закрытие бота"""
         logger.info("Закрытие бота...")
+
+        # Останавливаем HTTP API ObjMapper
+        if self.objmapper_api_runner:
+            try:
+                await self.objmapper_api_runner.cleanup()
+                logger.info("ObjMapper API остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка остановки ObjMapper API: {e}", exc_info=True)
 
         # Закрываем соединение с БД
         if self.db:

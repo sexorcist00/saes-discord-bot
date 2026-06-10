@@ -119,6 +119,39 @@ CREATE INDEX IF NOT EXISTS idx_source
 ON role_mapping_cache(source_server_id, source_role_id);
 """
 
+# ── ObjMapper: авторизация игрового скрипта ──
+
+CREATE_OBJMAPPER_LINK_TOKENS_TABLE = """
+CREATE TABLE IF NOT EXISTS objmapper_link_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_user_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMP NOT NULL,
+    is_used INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+CREATE_OBJMAPPER_LINK_TOKENS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_objmapper_token ON objmapper_link_tokens(token);
+"""
+
+CREATE_OBJMAPPER_AUTH_LINKS_TABLE = """
+CREATE TABLE IF NOT EXISTS objmapper_auth_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_user_id TEXT NOT NULL,
+    samp_nick TEXT NOT NULL UNIQUE,
+    auth_token TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMP,
+    script_version TEXT
+);
+"""
+
+CREATE_OBJMAPPER_AUTH_LINKS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_objmapper_auth ON objmapper_auth_links(auth_token);
+"""
+
 
 async def initialize_database(db_path: str) -> None:
     """
@@ -161,6 +194,12 @@ async def initialize_database(db_path: str) -> None:
             await db.execute(CREATE_ROLE_MAPPING_CACHE_TABLE)
             await db.execute(CREATE_ROLE_MAPPING_CACHE_INDEX)
             logger.debug("Таблица role_mapping_cache создана")
+
+            await db.execute(CREATE_OBJMAPPER_LINK_TOKENS_TABLE)
+            await db.execute(CREATE_OBJMAPPER_LINK_TOKENS_INDEX)
+            await db.execute(CREATE_OBJMAPPER_AUTH_LINKS_TABLE)
+            await db.execute(CREATE_OBJMAPPER_AUTH_LINKS_INDEX)
+            logger.debug("Таблицы ObjMapper созданы")
 
             await db.commit()
             logger.info("База данных успешно инициализирована")

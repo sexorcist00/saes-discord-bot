@@ -207,6 +207,46 @@ class Config:
         """Получить путь к базе данных"""
         return self._config['database'].get('path', 'data/bot.db')
 
+    # ============ Геттеры для ObjMapper API ============
+
+    def _objmapper_section(self) -> Dict[str, Any]:
+        """Секция objmapper (может отсутствовать)"""
+        return self._config.get('objmapper', {}) or {}
+
+    def is_objmapper_enabled(self) -> bool:
+        """Включён ли API авторизации ObjMapper"""
+        return bool(self._objmapper_section().get('enabled', False))
+
+    def get_objmapper_api_host(self) -> str:
+        """Хост HTTP API ObjMapper"""
+        return self._objmapper_section().get('api_host', '0.0.0.0')
+
+    def get_objmapper_api_port(self) -> int:
+        """Порт HTTP API ObjMapper"""
+        return int(self._objmapper_section().get('api_port', 3002))
+
+    def get_objmapper_token_ttl(self) -> int:
+        """TTL токена привязки ObjMapper в секундах"""
+        return int(self._objmapper_section().get('token_ttl_seconds', 3600))
+
+    def get_objmapper_nick_limits(self) -> tuple:
+        """(min, max) длина SAMP-ника"""
+        sec = self._objmapper_section()
+        return int(sec.get('nick_min_length', 1)), int(sec.get('nick_max_length', 24))
+
+    def get_objmapper_allowed_role_ids(self) -> List[int]:
+        """ID ролей, дающих доступ к ObjMapper (пустые/плейсхолдеры отброшены)"""
+        raw = self._objmapper_section().get('allowed_role_ids', []) or []
+        result = []
+        for rid in raw:
+            if rid is None or str(rid).strip() == '':
+                continue
+            try:
+                result.append(int(rid))
+            except (TypeError, ValueError):
+                logger.warning(f"Некорректный ID роли ObjMapper в конфиге: {rid!r}")
+        return result
+
     def get_log_level(self) -> str:
         """Получить уровень логирования"""
         return self._config['logging'].get('level', 'INFO')
