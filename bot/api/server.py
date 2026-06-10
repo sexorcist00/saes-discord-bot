@@ -159,6 +159,50 @@ async def handle_validate(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "nick": link["samp_nick"], "roles": roles})
 
 
+async def handle_avatar(request: web.Request) -> web.Response:
+    """
+    GET /api/objmapper/avatar — отдаёт аватар Discord-пользователя, привязанного к токену.
+
+    Байты скачиваются на стороне бота (discord.py Asset.read) и возвращаются как image/png —
+    Lua-клиент не умеет HTTPS к cdn.discordapp.com, поэтому проксируем через бота.
+    """
+    bot = request.app["bot"]
+    db = bot.db
+
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return web.json_response({"error": "NO_TOKEN"}, status=401)
+    auth_token = header[7:].strip()
+
+    link = await db.get_objmapper_link_by_token(auth_token)
+    if not link:
+        return web.json_response({"error": "UNAUTHORIZED"}, status=401)
+
+    guild = bot.get_guild(bot.config.get_main_server_id())
+    if guild is None:
+        return web.json_response({"error": "GUILD_UNAVAILABLE"}, status=503)
+    try:
+        member = await guild.fetch_member(int(link["discord_user_id"]))
+    except discord.NotFound:
+        return web.json_response({"error": "NOT_MEMBER"}, status=403)
+    except discord.HTTPException as e:
+        logger.warning(f"ObjMapper avatar: fetch_member failed: {e}")
+        return web.json_response({"error": "DISCORD_ERROR"}, status=502)
+
+    try:
+        asset = member.display_avatar.replace(size=64, static_format="png")
+        data = await asset.read()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ObjMapper avatar: read failed: {e}")
+        return web.json_response({"error": "AVATAR_FETCH_FAILED"}, status=502)
+
+    return web.Response(
+        body=data,
+        content_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 def build_app(bot) -> web.Application:
     """Собрать aiohttp-приложение с роутами ObjMapper."""
     app = web.Application(middlewares=[_error_middleware])
@@ -168,6 +212,7 @@ def build_app(bot) -> web.Application:
             web.get("/health", handle_health),
             web.post("/api/objmapper/link", handle_link),
             web.get("/api/objmapper/validate", handle_validate),
+            web.get("/api/objmapper/avatar", handle_avatar),
         ]
     )
     return app
