@@ -1,7 +1,7 @@
 """
-Cog авторизации ObjMapper: выдача 6-значного токена привязки игрового скрипта.
+Cog авторизации SAES Object Helper: выдача 6-значного токена привязки игрового скрипта.
 
-Пользователь вызывает /objmapper link, получает одноразовый токен и вводит его в
+Пользователь вызывает /objhelper link, получает одноразовый токен и вводит его в
 скрипте. Скрипт обменивает токен на постоянный auth_token через HTTP API
 (bot/api/server.py). Проверка членства в сервере и ролей происходит на стороне API
 в момент обмена и при каждой валидации.
@@ -35,10 +35,10 @@ class ObjMapperCog(commands.Cog):
         logger.info("ObjMapperCog загружен")
 
     objmapper = app_commands.Group(
-        name="objmapper", description="Авторизация скрипта ObjMapper"
+        name="objhelper", description="Авторизация скрипта SAES Object Helper"
     )
 
-    @objmapper.command(name="link", description="Получить токен для входа в ObjMapper")
+    @objmapper.command(name="link", description="Получить токен для входа в SAES Object Helper")
     async def link(self, interaction: discord.Interaction):
         """Выдать одноразовый 6-значный токен привязки."""
         await interaction.response.defer(ephemeral=True)
@@ -79,13 +79,13 @@ class ObjMapperCog(commands.Cog):
         minutes = max(1, ttl // 60)
         embed = create_info_embed(
             message=(
-                f"Ваш токен для входа в **ObjMapper**:\n\n"
+                f"Ваш токен для входа в **SAES Object Helper**:\n\n"
                 f"# `{token}`\n\n"
-                f"Введите его в окне авторизации скрипта вместе с вашим SAMP-ником.\n"
+                f"Введите его в окне авторизации скрипта (ник определится автоматически).\n"
                 f"Токен действует **{minutes} мин** и работает один раз.\n\n"
                 f"Никому не передавайте этот токен."
             ),
-            title="🔑 ObjMapper — токен входа",
+            title="🔑 SAES Object Helper — токен входа",
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
         logger.info(f"ObjMapper: выдан токен пользователю {interaction.user.id}")
