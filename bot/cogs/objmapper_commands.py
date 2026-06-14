@@ -80,7 +80,7 @@ class ObjMapperCog(commands.Cog):
         embed = create_info_embed(
             message=(
                 f"Ваш токен для входа в **SAES Object Helper**:\n\n"
-                f"# `{token}`\n\n"
+                f"```\n{token}\n```\n"
                 f"Введите его в окне авторизации скрипта (ник определится автоматически).\n"
                 f"Токен действует **{minutes} мин** и работает один раз.\n\n"
                 f"Никому не передавайте этот токен."
