@@ -52,6 +52,10 @@ class RoleSyncBot(commands.Bot):
         # HTTP API авторизации ObjMapper (aiohttp runner, создаётся в setup_hook)
         self.objmapper_api_runner = None
 
+        # Провайдер форума и валидатор заявок (источник истины), создаются в setup_hook
+        self.forum_provider = None
+        self.request_validator = None
+
         # Флаг готовности
         self.is_ready = False
 
@@ -78,6 +82,17 @@ class RoleSyncBot(commands.Bot):
             self.role_mapper = RoleMapper(self.config, self.db)
             await self.role_mapper.initialize()
             logger.info("Общий RoleMapper инициализирован")
+
+            # Провайдер форума + валидатор заявок (источник истины).
+            # Независимы от ObjMapper API.
+            from bot.core.forum_provider import create_forum_provider
+            from bot.core.request_validator import RequestValidator
+            self.forum_provider = create_forum_provider(self.config)
+            self.request_validator = RequestValidator(self.forum_provider)
+            logger.info(
+                f"Провайдер форума: {type(self.forum_provider).__name__} "
+                f"(forum_enabled={self.config.is_forum_enabled()})"
+            )
 
         except Exception as e:
             logger.error(f"Ошибка инициализации базы данных: {e}", exc_info=True)
@@ -223,6 +238,14 @@ class RoleSyncBot(commands.Bot):
                 logger.info("ObjMapper API остановлен")
             except Exception as e:
                 logger.error(f"Ошибка остановки ObjMapper API: {e}", exc_info=True)
+
+        # Закрываем провайдер форума (HTTP-сессию)
+        if self.forum_provider:
+            try:
+                await self.forum_provider.close()
+                logger.info("Провайдер форума закрыт")
+            except Exception as e:
+                logger.error(f"Ошибка закрытия провайдера форума: {e}", exc_info=True)
 
         # Закрываем соединение с БД
         if self.db:
