@@ -13,6 +13,11 @@ from bot.utils.errors import ConfigurationError
 logger = get_logger("config")
 
 
+# Допустимые источники истины для маппинга
+SOURCE_OF_TRUTH_VALUES = ("fraction_discord", "forum", "manual")
+DEFAULT_SOURCE_OF_TRUTH = "fraction_discord"
+
+
 @dataclass
 class RoleMapping:
     """Маппинг роли между серверами"""
@@ -23,10 +28,24 @@ class RoleMapping:
     target_role_id: int
     description: str
     enabled: bool = True
+    # Источник истины для этого маппинга:
+    #   fraction_discord — правда = роль на фракционном Discord (автосинк);
+    #   forum            — правда = ранг на форуме фракции (проверка через ForumProvider);
+    #   manual           — без автопроверки, только ручное одобрение заявки.
+    source_of_truth: str = DEFAULT_SOURCE_OF_TRUTH
+    # Имя ранга/группы на форуме (используется при source_of_truth == 'forum')
+    forum_rank: str = ''
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'RoleMapping':
         """Создать объект из словаря"""
+        sot = data.get('source_of_truth', DEFAULT_SOURCE_OF_TRUTH)
+        if sot not in SOURCE_OF_TRUTH_VALUES:
+            logger.warning(
+                f"Некорректный source_of_truth '{sot}' в маппинге {data.get('id')}, "
+                f"использую '{DEFAULT_SOURCE_OF_TRUTH}'"
+            )
+            sot = DEFAULT_SOURCE_OF_TRUTH
         return cls(
             id=data['id'],
             source_server_id=int(data['source_server_id']),
@@ -34,7 +53,9 @@ class RoleMapping:
             target_server_id=int(data['target_server_id']),
             target_role_id=int(data['target_role_id']),
             description=data.get('description', ''),
-            enabled=data.get('enabled', True)
+            enabled=data.get('enabled', True),
+            source_of_truth=sot,
+            forum_rank=data.get('forum_rank', '')
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -46,7 +67,9 @@ class RoleMapping:
             'target_server_id': str(self.target_server_id),
             'target_role_id': str(self.target_role_id),
             'description': self.description,
-            'enabled': self.enabled
+            'enabled': self.enabled,
+            'source_of_truth': self.source_of_truth,
+            'forum_rank': self.forum_rank
         }
 
 
@@ -191,6 +214,57 @@ class Config:
         channel_id = self._config['bot'].get('log_channel_id')
         return int(channel_id) if channel_id else None
 
+    def get_fraction_server_ids(self) -> List[int]:
+        """
+        Явно сконфигурированные ID фракционных серверов.
+
+        Если список пуст — потребители (напр. cog membership) трактуют все
+        гильдии бота, кроме главного сервера, как фракционные.
+        """
+        raw = self._config['bot'].get('fraction_server_ids', []) or []
+        result = []
+        for sid in raw:
+            if sid is None or str(sid).strip() == '':
+                continue
+            try:
+                result.append(int(sid))
+            except (TypeError, ValueError):
+                logger.warning(f"Некорректный ID фракционного сервера в конфиге: {sid!r}")
+        return result
+
+    # ============ Геттеры для заявок на роли ============
+
+    def _requests_section(self) -> Dict[str, Any]:
+        """Секция requests (может отсутствовать)"""
+        return self._config.get('requests', {}) or {}
+
+    def is_requests_enabled(self) -> bool:
+        """Включён ли flow заявок на роли"""
+        return bool(self._requests_section().get('enabled', False))
+
+    def get_request_button_channel_id(self) -> Optional[int]:
+        """ID канала, где размещается кнопка 'Получить роли' (аналог CL_REQUEST_CH)"""
+        channel_id = self._requests_section().get('button_channel_id')
+        return int(channel_id) if channel_id else None
+
+    def get_request_admin_channel_id(self) -> Optional[int]:
+        """ID канала админ-ревью заявок (аналог ADM_ROLES_CH)"""
+        channel_id = self._requests_section().get('admin_channel_id')
+        return int(channel_id) if channel_id else None
+
+    def get_request_admin_role_ids(self) -> List[int]:
+        """ID ролей, которые могут одобрять/отклонять заявки"""
+        raw = self._requests_section().get('admin_role_ids', []) or []
+        result = []
+        for rid in raw:
+            if rid is None or str(rid).strip() == '':
+                continue
+            try:
+                result.append(int(rid))
+            except (TypeError, ValueError):
+                logger.warning(f"Некорректный ID роли админа заявок в конфиге: {rid!r}")
+        return result
+
     def is_auto_sync_enabled(self) -> bool:
         """Проверить включена ли автоматическая синхронизация"""
         return self._config['sync'].get('auto_sync_enabled', True)
@@ -246,6 +320,32 @@ class Config:
             except (TypeError, ValueError):
                 logger.warning(f"Некорректный ID роли ObjMapper в конфиге: {rid!r}")
         return result
+
+    # ============ Геттеры для форума (источник истины) ============
+
+    def _forum_section(self) -> Dict[str, Any]:
+        """Секция forum (может отсутствовать)"""
+        return self._config.get('forum', {}) or {}
+
+    def is_forum_enabled(self) -> bool:
+        """Включена ли интеграция с форумом (источник истины 'forum')"""
+        return bool(self._forum_section().get('enabled', False))
+
+    def get_forum_provider_type(self) -> str:
+        """Тип провайдера форума: 'http' (реальный форум) или 'stub' (заглушка)"""
+        return self._forum_section().get('provider', 'stub')
+
+    def get_forum_base_url(self) -> str:
+        """Базовый URL фракционного форума"""
+        return self._forum_section().get('base_url', '')
+
+    def get_forum_request_timeout(self) -> int:
+        """Таймаут HTTP-запросов к форуму в секундах"""
+        return int(self._forum_section().get('request_timeout_seconds', 10))
+
+    def get_forum_cache_ttl(self) -> int:
+        """TTL кэша ответов форума в секундах (чтобы не дёргать форум на каждый синк)"""
+        return int(self._forum_section().get('cache_ttl_seconds', 300))
 
     def get_log_level(self) -> str:
         """Получить уровень логирования"""
