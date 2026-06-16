@@ -91,6 +91,13 @@ class RoleSyncBot(commands.Bot):
         await self.load_extension("bot.cogs.membership")
         logger.info("Все cogs загружены успешно")
 
+        # Flow заявок на роли (опционально)
+        if self.config.is_requests_enabled():
+            await self.load_extension("bot.cogs.requests")
+            logger.info("Flow заявок на роли включён")
+        else:
+            logger.info("Flow заявок на роли отключён в конфиге")
+
         # ObjMapper: команда выдачи токена + HTTP API авторизации (опционально)
         if self.config.is_objmapper_enabled():
             try:
