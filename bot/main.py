@@ -88,6 +88,7 @@ class RoleSyncBot(commands.Bot):
         await self.load_extension("bot.cogs.role_monitor")
         await self.load_extension("bot.cogs.admin_commands")
         await self.load_extension("bot.cogs.stats_commands")
+        await self.load_extension("bot.cogs.membership")
         logger.info("Все cogs загружены успешно")
 
         # ObjMapper: команда выдачи токена + HTTP API авторизации (опционально)
