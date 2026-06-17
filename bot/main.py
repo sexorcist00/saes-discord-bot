@@ -52,6 +52,9 @@ class RoleSyncBot(commands.Bot):
         # HTTP API авторизации ObjMapper (aiohttp runner, создаётся в setup_hook)
         self.objmapper_api_runner = None
 
+        # Audit-логгер важных событий (канал настраивается через /setup)
+        self.audit = None
+
         # Флаг готовности
         self.is_ready = False
 
@@ -83,11 +86,16 @@ class RoleSyncBot(commands.Bot):
             logger.error(f"Ошибка инициализации базы данных: {e}", exc_info=True)
             raise
 
+        # Audit-логгер (канал берётся из bot_settings, настраивается через /setup)
+        from bot.core.audit import AuditLogger
+        self.audit = AuditLogger(self)
+
         # Загрузка cogs
         await self.load_extension("bot.cogs.sync_button")
         await self.load_extension("bot.cogs.role_monitor")
         await self.load_extension("bot.cogs.admin_commands")
         await self.load_extension("bot.cogs.stats_commands")
+        await self.load_extension("bot.cogs.setup_commands")
         logger.info("Все cogs загружены успешно")
 
         # ObjMapper: команда выдачи токена + HTTP API авторизации (опционально)
@@ -177,6 +185,14 @@ class RoleSyncBot(commands.Bot):
 
         except Exception as e:
             logger.error(f"❌ Ошибка синхронизации команд: {e}")
+
+        # Подсказка по первоначальной настройке, если audit-канал ещё не выбран
+        try:
+            if self.audit and not await self.audit.is_configured():
+                logger.warning("⚙️  Бот не настроен: канал audit-логов не выбран. "
+                               "Выполните /setup на главном сервере.")
+        except Exception:  # noqa: BLE001
+            pass
 
         logger.info("Бот полностью готов к работе!")
 

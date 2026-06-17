@@ -116,13 +116,24 @@ async def handle_link(request: web.Request) -> web.Response:
         # Токен валиден, но доступа нет (не в сервере / нет роли).
         return web.json_response({"error": "NO_ACCESS", "reason": reason}, status=403)
 
+    # Новый ли это пользователь (нет прежней привязки этого Discord-аккаунта)?
+    prior = await db.get_objmapper_link_by_user(rec["discord_user_id"])
+
     auth_token = uuid.uuid4().hex
     await db.mark_objmapper_token_used(token)
     await db.upsert_objmapper_link(rec["discord_user_id"], nick, auth_token)
     logger.info(
         f"ObjMapper: привязка user={rec['discord_user_id']} nick={nick!r} "
-        f"(ролей: {len(roles)})"
+        f"(ролей: {len(roles)}, новый={not prior})"
     )
+
+    # Audit: новый пользователь скрипта (только первая привязка аккаунта).
+    if prior is None and getattr(bot, "audit", None):
+        try:
+            await bot.audit.new_user(rec["discord_user_id"], nick, roles)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"audit new_user failed: {e}")
+
     return web.json_response(
         {"auth_token": auth_token, "nick": nick, "roles": roles}, status=201
     )
@@ -148,13 +159,25 @@ async def handle_validate(request: web.Request) -> web.Response:
 
     # Обновляем last_seen/версию не чаще раза в 60с на токен.
     version = request.headers.get("X-Script-Version")
+    old_version = link.get("script_version")
+    # Смена версии (был известен старый, пришёл другой) = пользователь обновил скрипт.
+    version_changed = bool(version and old_version and version != old_version)
     now = time.monotonic()
-    if now - _version_last_write.get(auth_token, 0) >= _VERSION_THROTTLE_S:
+    if version_changed or now - _version_last_write.get(auth_token, 0) >= _VERSION_THROTTLE_S:
         _version_last_write[auth_token] = now
         try:
             await db.touch_objmapper_link(auth_token, version)
         except Exception as e:  # noqa: BLE001 — не валим валидацию из-за записи метрики
             logger.warning(f"ObjMapper: touch_objmapper_link failed: {e}")
+
+    # Audit: обновление скрипта.
+    if version_changed and getattr(bot, "audit", None):
+        try:
+            await bot.audit.script_updated(
+                link["discord_user_id"], link["samp_nick"], old_version, version
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"audit script_updated failed: {e}")
 
     return web.json_response({"ok": True, "nick": link["samp_nick"], "roles": roles})
 

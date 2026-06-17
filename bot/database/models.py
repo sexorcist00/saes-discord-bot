@@ -222,6 +222,16 @@ CREATE TABLE IF NOT EXISTS objmapper_hourly_activity (
 );
 """
 
+# ── Настройки бота (key/value) — первоначальная настройка через /setup ──
+# Напр. objmapper_audit_channel_id — канал для audit-логов важных событий.
+CREATE_BOT_SETTINGS_TABLE = """
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 
 async def initialize_database(db_path: str) -> None:
     """
@@ -277,6 +287,9 @@ async def initialize_database(db_path: str) -> None:
             await db.execute(CREATE_OBJMAPPER_MODEL_USAGE_TABLE)
             await db.execute(CREATE_OBJMAPPER_HOURLY_ACTIVITY_TABLE)
             logger.debug("Таблицы телеметрии ObjMapper созданы")
+
+            await db.execute(CREATE_BOT_SETTINGS_TABLE)
+            logger.debug("Таблица bot_settings создана")
 
             await db.commit()
             logger.info("База данных успешно инициализирована")

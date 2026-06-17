@@ -696,6 +696,14 @@ class DatabaseOperations:
         row = await self._fetchone(query, (auth_token,))
         return dict(row) if row else None
 
+    async def get_objmapper_link_by_user(self, discord_user_id: str) -> Optional[Dict]:
+        """Получить привязку по Discord-аккаунту (для отличия новой привязки от повторной)."""
+        row = await self._fetchone(
+            "SELECT * FROM objmapper_auth_links WHERE discord_user_id = ?",
+            (str(discord_user_id),),
+        )
+        return dict(row) if row else None
+
     async def touch_objmapper_link(self, auth_token: str, script_version: Optional[str]) -> None:
         """Обновить last_seen_at и версию скрипта при успешной валидации"""
         query = """
@@ -1011,6 +1019,28 @@ class DatabaseOperations:
             (int(limit),),
         )
         return [dict(r) for r in rows]
+
+    # ============ Настройки бота (key/value) ============
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        """Получить значение настройки бота (или None)."""
+        row = await self._fetchone("SELECT value FROM bot_settings WHERE key = ?", (key,))
+        return row["value"] if row else None
+
+    async def set_setting(self, key: str, value: Optional[str]) -> None:
+        """Установить значение настройки бота (upsert)."""
+        await self._execute(
+            """
+            INSERT INTO bot_settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+
+    async def delete_setting(self, key: str) -> None:
+        """Удалить настройку бота."""
+        await self._execute("DELETE FROM bot_settings WHERE key = ?", (key,))
 
     async def get_objmapper_all_users(self, limit: int = 1000) -> List[Dict]:
         """Все пользователи телеметрии (ник + Discord) — для списка в меню."""
