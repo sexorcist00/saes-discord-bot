@@ -116,13 +116,16 @@ class StatsMenuView(discord.ui.View):
         self.message: Optional[discord.Message] = None
 
         self.section_select = _SectionSelect(self._base_section())
+        self.refresh_btn = discord.ui.Button(label="🔄 Обновить", style=discord.ButtonStyle.primary, row=1)
         self.prev_btn = discord.ui.Button(label="◀️", style=discord.ButtonStyle.secondary, row=1)
         self.next_btn = discord.ui.Button(label="▶️", style=discord.ButtonStyle.secondary, row=1)
+        self.refresh_btn.callback = self._on_refresh
         self.prev_btn.callback = self._on_prev
         self.next_btn.callback = self._on_next
         self.user_select: Optional[_UserSelect] = None
 
         self.add_item(self.section_select)
+        self.add_item(self.refresh_btn)
 
     # ── доступ только инициатору (месседж и так эфемерный) ──
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -134,6 +137,12 @@ class StatsMenuView(discord.ui.View):
     def _base_section(self) -> str:
         """Какой пункт Select подсветить (детальный просмотр юзера → пункт «Пользователи»)."""
         return "users" if self.section.startswith("user:") else self.section
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        # Сброс кэша списка пользователей → перезагрузится в _ensure_data;
+        # обзор/топы/карточка читают БД при каждом построении, поэтому обновятся сами.
+        self.users = []
+        await self.refresh(interaction)
 
     async def _on_prev(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
