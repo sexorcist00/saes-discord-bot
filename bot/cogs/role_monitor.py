@@ -176,6 +176,16 @@ class RoleMonitorCog(commands.Cog):
                         f"Автосинхронизация для {user_id} успешна: "
                         f"+{len(result.roles_added)}, -{len(result.roles_removed)}"
                     )
+                    # Audit: только реальные изменения ролей.
+                    if result.total_changes > 0 and getattr(self.bot, "audit", None):
+                        try:
+                            main_guild = self.bot.get_guild(self.bot.config.get_main_server_id())
+                            await self.bot.audit.roles_synced(
+                                user_id, "auto",
+                                result.roles_added, result.roles_removed, main_guild
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"audit roles_synced (auto) failed: {e}")
                 else:
                     logger.warning(
                         f"Автосинхронизация для {user_id} завершена с ошибками: "

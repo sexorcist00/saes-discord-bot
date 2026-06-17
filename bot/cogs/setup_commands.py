@@ -18,11 +18,16 @@ from bot.utils.logger import get_logger
 logger = get_logger("cogs.setup_commands")
 
 
+AUDIT_CHANNEL_NAME = "objmapper-audit"
+
+
 class _AuditChannelSelect(discord.ui.ChannelSelect):
+    """Выбор СУЩЕСТВУЮЩЕГО текстового канала."""
+
     def __init__(self):
         super().__init__(
             channel_types=[discord.ChannelType.text],
-            placeholder="Выберите канал для audit-логов…",
+            placeholder="Выбрать существующий канал…",
             min_values=1,
             max_values=1,
             row=0,
@@ -33,8 +38,28 @@ class _AuditChannelSelect(discord.ui.ChannelSelect):
         await self.view.cog.bot.db.set_setting(AUDIT_CHANNEL_KEY, str(ch.id))
         logger.info(f"Audit-канал установлен: #{getattr(ch, 'name', ch.id)} ({ch.id}) "
                     f"админом {interaction.user}")
-        # Тестовое сообщение в выбранный канал (через сам AuditLogger)
         await self.view.cog.send_test_message(ch.id)
+        embed = await self.view.cog.build_setup_embed()
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class _AuditCategorySelect(discord.ui.ChannelSelect):
+    """Выбор КАТЕГОРИИ — бот сам создаст приватный канал внутри неё."""
+
+    def __init__(self):
+        super().__init__(
+            channel_types=[discord.ChannelType.category],
+            placeholder="…или выбрать категорию (создам приватный канал)",
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        category_id = self.values[0].id
+        ch = await self.view.cog.create_audit_channel(interaction, category_id)
+        if ch is None:
+            return  # ошибка уже показана в create_audit_channel
         embed = await self.view.cog.build_setup_embed()
         await interaction.response.edit_message(embed=embed, view=self.view)
 
@@ -47,6 +72,7 @@ class SetupView(discord.ui.View):
         self.author_id = author_id
         self.message: Optional[discord.Message] = None
         self.add_item(_AuditChannelSelect())
+        self.add_item(_AuditCategorySelect())
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -54,7 +80,7 @@ class SetupView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Отключить логи", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Отключить логи", style=discord.ButtonStyle.danger, row=2)
     async def disable(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.bot.db.delete_setting(AUDIT_CHANNEL_KEY)
         logger.info(f"Audit-логи отключены админом {interaction.user}")
@@ -86,11 +112,12 @@ class SetupCog(commands.Cog):
         embed = discord.Embed(
             title="⚙️ Настройка бота — ObjMapper",
             description=(
-                "Выберите канал, в который бот будет писать **audit-логи** важных событий:\n"
-                "• 🆕 новый пользователь скрипта\n"
-                "• ⬆️ обновление версии скрипта\n"
-                "• ⛔ потеря доступа\n\n"
-                "Используйте меню ниже, чтобы выбрать канал."
+                "Куда бот пишет **audit-логи** важных событий:\n"
+                "• 🆕 новый пользователь · ⬆️ обновление версии · ⛔ потеря доступа\n"
+                "• 🎭 выдача/снятие ролей (кнопка и авто-синхронизация)\n"
+                "• 🧰 массовая синхронизация · 🗺 изменение маппингов · 🔁 тумблер автосинка\n\n"
+                "**Выберите существующий канал** или **категорию** — во втором случае "
+                "я сам создам приватный канал внутри неё."
             ),
             color=COLOR_PRIMARY,
         )
@@ -101,6 +128,46 @@ class SetupCog(commands.Cog):
             embed.add_field(name="Канал audit-логов", value="❌ не настроен", inline=False)
             embed.set_footer(text="Логи выключены, пока не выбран канал.")
         return embed
+
+    async def create_audit_channel(self, interaction: discord.Interaction, category_id: int):
+        """Создать ПРИВАТНЫЙ канал audit-логов в выбранной категории. None при ошибке прав."""
+        guild = interaction.guild
+        category = guild.get_channel(category_id)
+        # Приватный по умолчанию: @everyone не видит, бот пишет.
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, embed_links=True
+            ),
+        }
+        try:
+            ch = await guild.create_text_channel(
+                AUDIT_CHANNEL_NAME,
+                category=category if isinstance(category, discord.CategoryChannel) else None,
+                overwrites=overwrites,
+                reason=f"ObjMapper: приватный канал audit-логов (создал {interaction.user})",
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                embed=create_error_embed(
+                    "Боту не хватает права **Управление каналами** (Manage Channels), "
+                    "чтобы создать канал. Выдайте право или выберите существующий канал.",
+                    "Недостаточно прав",
+                ),
+                ephemeral=True,
+            )
+            return None
+        except Exception as e:  # noqa: BLE001
+            await interaction.response.send_message(
+                embed=create_error_embed(f"Не удалось создать канал: {e}"), ephemeral=True
+            )
+            return None
+
+        await self.bot.db.set_setting(AUDIT_CHANNEL_KEY, str(ch.id))
+        logger.info(f"Создан приватный audit-канал #{ch.name} ({ch.id}) "
+                    f"в категории {category_id} админом {interaction.user}")
+        await self.send_test_message(ch.id)
+        return ch
 
     async def send_test_message(self, channel_id: int):
         """Подтверждение в выбранный канал (через AuditLogger → проверка прав/доступа)."""

@@ -233,6 +233,12 @@ class AdminCommandsCog(commands.Cog):
                 f"Массовая синхронизация выполнена пользователем {ctx.author}: {stats}"
             )
 
+            if getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.mass_sync(ctx.author, stats)
+                except Exception as ae:  # noqa: BLE001
+                    logger.warning(f"audit mass_sync failed: {ae}")
+
         except Exception as e:
             logger.error(f"Ошибка массовой синхронизации: {e}", exc_info=True)
             await progress_msg.edit(
@@ -392,6 +398,16 @@ class AdminCommandsCog(commands.Cog):
 
             logger.info(f"Маппинг {mapping_id} добавлен пользователем {ctx.author}")
 
+            if getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.mapping_changed(
+                        ctx.author, "добавлен",
+                        f"`{mapping_id}`: роль `{source_role_id}` (сервер `{source_server_id}`) "
+                        f"→ роль `{target_role_id}`"
+                    )
+                except Exception as ae:  # noqa: BLE001
+                    logger.warning(f"audit mapping_changed (add) failed: {ae}")
+
         except Exception as e:
             logger.error(f"Ошибка добавления маппинга: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
@@ -412,6 +428,13 @@ class AdminCommandsCog(commands.Cog):
                     ephemeral=True
                 )
                 logger.info(f"Маппинг {mapping_id} удален пользователем {ctx.author}")
+                if getattr(self.bot, "audit", None):
+                    try:
+                        await self.bot.audit.mapping_changed(
+                            ctx.author, "удалён", f"ID `{mapping_id}`"
+                        )
+                    except Exception as ae:  # noqa: BLE001
+                        logger.warning(f"audit mapping_changed (remove) failed: {ae}")
             else:
                 await ctx.send(
                     embed=create_error_embed(
@@ -441,6 +464,14 @@ class AdminCommandsCog(commands.Cog):
             )
 
             logger.info(f"Конфигурация перезагружена пользователем {ctx.author}")
+
+            if getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.mapping_changed(
+                        ctx.author, "перезагрузка конфигурации", "Маппинги перечитаны из файлов"
+                    )
+                except Exception as ae:  # noqa: BLE001
+                    logger.warning(f"audit mapping_changed (reload) failed: {ae}")
 
         except Exception as e:
             logger.error(f"Ошибка перезагрузки конфигурации: {e}", exc_info=True)
@@ -597,6 +628,11 @@ class AdminCommandsCog(commands.Cog):
                 ephemeral=True
             )
             logger.info(f"Автосинхронизация отключена пользователем {ctx.author}")
+            if getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.autosync_toggled(ctx.author, False)
+                except Exception as ae:  # noqa: BLE001
+                    logger.warning(f"audit autosync_toggled failed: {ae}")
         else:
             monitor_cog.process_pending_syncs.start()
             await ctx.send(
@@ -607,6 +643,11 @@ class AdminCommandsCog(commands.Cog):
                 ephemeral=True
             )
             logger.info(f"Автосинхронизация включена пользователем {ctx.author}")
+            if getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.autosync_toggled(ctx.author, True)
+                except Exception as ae:  # noqa: BLE001
+                    logger.warning(f"audit autosync_toggled failed: {ae}")
 
     @role_admin.error
     async def role_admin_error(self, ctx: commands.Context, error: Exception):

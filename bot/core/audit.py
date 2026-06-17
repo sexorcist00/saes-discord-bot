@@ -17,6 +17,15 @@ AUDIT_CHANNEL_KEY = "objmapper_audit_channel_id"
 _COLOR_NEW = 0x2ecc71      # новый пользователь — зелёный
 _COLOR_UPDATE = 0x3498db   # обновление — синий
 _COLOR_WARN = 0xf39c12     # предупреждение — оранжевый
+_COLOR_SYNC = 0x5865f2     # синхронизация ролей — blurple
+_COLOR_ADMIN = 0x95a5a6    # админ-действия — серый
+
+_TRIGGER_LABELS = {
+    "button": "по кнопке",
+    "auto": "авто-синхронизация",
+    "manual": "вручную",
+    "command": "командой",
+}
 
 
 class AuditLogger:
@@ -106,4 +115,79 @@ class AuditLogger:
         )
         embed.add_field(name="SA-MP ник", value=f"`{nick}`", inline=True)
         embed.add_field(name="Discord", value=self._mention(discord_user_id), inline=True)
+        await self.emit(embed)
+
+    # ── События синхронизации ролей ──
+
+    def _role_names(self, guild, role_ids):
+        out = []
+        for rid in role_ids:
+            role = guild.get_role(rid) if guild else None
+            out.append(role.mention if role else f"`{rid}`")
+        return ", ".join(out) if out else "—"
+
+    async def roles_synced(self, user_id, trigger, added_ids, removed_ids, guild=None):
+        """Пользователю выданы/сняты роли (кнопка или авто-синхронизация)."""
+        if not added_ids and not removed_ids:
+            return  # нечего логировать
+        embed = discord.Embed(
+            title="🎭 Синхронизация ролей",
+            color=_COLOR_SYNC,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Пользователь", value=self._mention(user_id), inline=True)
+        embed.add_field(name="Триггер", value=_TRIGGER_LABELS.get(trigger, trigger), inline=True)
+        if added_ids:
+            embed.add_field(name="➕ Выдано", value=self._role_names(guild, added_ids), inline=False)
+        if removed_ids:
+            embed.add_field(name="➖ Снято", value=self._role_names(guild, removed_ids), inline=False)
+        await self.emit(embed)
+
+    # ── Админ-действия ──
+
+    @staticmethod
+    def _admin(admin) -> str:
+        if admin is None:
+            return "—"
+        return f"{getattr(admin, 'mention', admin)} (`{getattr(admin, 'id', '?')}`)"
+
+    async def mass_sync(self, admin, stats: dict):
+        """Администратор запустил массовую синхронизацию."""
+        embed = discord.Embed(
+            title="🧰 Массовая синхронизация",
+            color=_COLOR_ADMIN,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Инициатор", value=self._admin(admin), inline=False)
+        embed.add_field(
+            name="Итог",
+            value=(
+                f"Всего: **{stats.get('total', 0)}** · "
+                f"✅ **{stats.get('success', 0)}** · "
+                f"❌ **{stats.get('failed', 0)}** · "
+                f"без изменений: **{stats.get('no_changes', 0)}**"
+            ),
+            inline=False,
+        )
+        await self.emit(embed)
+
+    async def mapping_changed(self, admin, action: str, description: str):
+        """Изменение конфигурации маппинга ролей администратором."""
+        embed = discord.Embed(
+            title=f"🗺 Маппинг ролей: {action}",
+            description=description,
+            color=_COLOR_ADMIN,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Инициатор", value=self._admin(admin), inline=False)
+        await self.emit(embed)
+
+    async def autosync_toggled(self, admin, enabled: bool):
+        """Администратор включил/выключил авто-синхронизацию."""
+        embed = discord.Embed(
+            title=f"🔁 Авто-синхронизация {'включена' if enabled else 'выключена'}",
+            color=_COLOR_NEW if enabled else _COLOR_WARN,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Инициатор", value=self._admin(admin), inline=False)
         await self.emit(embed)

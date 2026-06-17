@@ -184,6 +184,16 @@ class SyncButtonCog(commands.Cog):
                 f"+{len(result.roles_added)}, -{len(result.roles_removed)}"
             )
 
+            # Audit: логируем только реальные изменения ролей (не каждое нажатие).
+            if result.total_changes > 0 and getattr(self.bot, "audit", None):
+                try:
+                    await self.bot.audit.roles_synced(
+                        interaction.user.id, "button",
+                        result.roles_added, result.roles_removed, interaction.guild
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"audit roles_synced (button) failed: {e}")
+
         except UserNotFoundError as e:
             # Пользователь не найден на главном сервере
             error_embed = create_error_embed(
