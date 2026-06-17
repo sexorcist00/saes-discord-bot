@@ -1011,3 +1011,17 @@ class DatabaseOperations:
             (int(limit),),
         )
         return [dict(r) for r in rows]
+
+    async def get_objmapper_all_users(self, limit: int = 1000) -> List[Dict]:
+        """Все пользователи телеметрии (ник + Discord) — для списка в меню."""
+        rows = await self._fetchall(
+            """
+            SELECT discord_user_id, samp_nick, last_seen_at,
+                   ghost_total, server_total, sessions_total
+            FROM objmapper_user_stats
+            ORDER BY (last_seen_at IS NULL), last_seen_at DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in rows]
