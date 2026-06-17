@@ -203,6 +203,54 @@ async def handle_avatar(request: web.Request) -> web.Response:
     )
 
 
+# Лимит размера тела телеметрии (батч-хартбит — маленький JSON).
+_TELEMETRY_MAX_BODY = 16 * 1024
+
+
+async def handle_telemetry(request: web.Request) -> web.Response:
+    """
+    POST /api/objmapper/telemetry — приём батч-хартбита статистики (Bearer).
+
+    Роли НЕ перепроверяются на каждом хартбите (это вызов Discord API раз в минуту
+    на пользователя): достаточно существования токена. Живая ревалидация членства/
+    ролей и так идёт на /validate при каждом старте скрипта.
+    """
+    bot = request.app["bot"]
+    db = bot.db
+
+    if not bot.config.is_objmapper_telemetry_enabled():
+        return web.json_response({"ok": False, "error": "DISABLED"}, status=200)
+
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return web.json_response({"error": "NO_TOKEN"}, status=401)
+    auth_token = header[7:].strip()
+
+    link = await db.get_objmapper_link_by_token(auth_token)
+    if not link:
+        return web.json_response({"error": "UNAUTHORIZED"}, status=401)
+
+    if request.content_length and request.content_length > _TELEMETRY_MAX_BODY:
+        return web.json_response({"error": "PAYLOAD_TOO_LARGE"}, status=413)
+
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "BAD_JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return web.json_response({"error": "BAD_PAYLOAD"}, status=400)
+
+    try:
+        await db.apply_objmapper_telemetry(
+            link["discord_user_id"], link["samp_nick"], payload
+        )
+    except Exception as e:  # noqa: BLE001 — не валим клиента из-за ошибки записи метрики
+        logger.warning(f"ObjMapper telemetry: apply failed: {e}", exc_info=True)
+        return web.json_response({"ok": False, "error": "STORE_FAILED"}, status=200)
+
+    return web.json_response({"ok": True})
+
+
 def build_app(bot) -> web.Application:
     """Собрать aiohttp-приложение с роутами ObjMapper."""
     app = web.Application(middlewares=[_error_middleware])
@@ -213,6 +261,7 @@ def build_app(bot) -> web.Application:
             web.post("/api/objmapper/link", handle_link),
             web.get("/api/objmapper/validate", handle_validate),
             web.get("/api/objmapper/avatar", handle_avatar),
+            web.post("/api/objmapper/telemetry", handle_telemetry),
         ]
     )
     return app

@@ -94,6 +94,7 @@ class RoleSyncBot(commands.Bot):
         if self.config.is_objmapper_enabled():
             try:
                 await self.load_extension("bot.cogs.objmapper_commands")
+                await self.load_extension("bot.cogs.objmapper_stats")
                 from bot.api.server import start_api
                 self.objmapper_api_runner = await start_api(self)
                 logger.info("ObjMapper: cog и HTTP API инициализированы")

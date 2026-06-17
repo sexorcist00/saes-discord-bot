@@ -234,6 +234,10 @@ class Config:
         sec = self._objmapper_section()
         return int(sec.get('nick_min_length', 1)), int(sec.get('nick_max_length', 24))
 
+    def is_objmapper_telemetry_enabled(self) -> bool:
+        """Включён ли приём телеметрии использования (по умолчанию да)"""
+        return bool(self._objmapper_section().get('telemetry_enabled', True))
+
     def get_objmapper_allowed_role_ids(self) -> List[int]:
         """ID ролей, дающих доступ к ObjMapper (пустые/плейсхолдеры отброшены)"""
         raw = self._objmapper_section().get('allowed_role_ids', []) or []

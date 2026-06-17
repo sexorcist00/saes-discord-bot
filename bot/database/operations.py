@@ -704,3 +704,310 @@ class DatabaseOperations:
         WHERE auth_token = ?
         """
         await self._execute(query, (script_version, auth_token))
+
+    # ============ ObjMapper: телеметрия использования ============
+
+    async def apply_objmapper_telemetry(
+        self, discord_user_id: str, samp_nick: Optional[str], payload: Dict
+    ) -> None:
+        """
+        Применить один батч-хартбит телеметрии (дельты) в одной транзакции:
+          - кумулятив + last-* в objmapper_user_stats,
+          - суточный ролл-ап в objmapper_daily_stats,
+          - популярность моделей в objmapper_model_usage,
+          - активность по часам в objmapper_hourly_activity.
+
+        Все поля payload — необязательные/санитизируются: кривой ввод не валит запись.
+        """
+        def _int(v, lo: int = 0, hi: int = 10_000_000) -> int:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                return 0
+            if n < lo:
+                return lo
+            if n > hi:
+                return hi
+            return n
+
+        counts = payload.get("counts") or {}
+        tools = payload.get("tools") or {}
+        models = payload.get("models") or {}
+
+        is_new = 1 if payload.get("is_new_session") else 0
+        secs = _int(payload.get("session_seconds_delta"))
+        c_menu = _int(counts.get("menu_open"))
+        c_ghost = _int(counts.get("ghost_placed"))
+        c_server = _int(counts.get("server_placed"))
+        c_delete = _int(counts.get("delete"))
+        c_errors = _int(counts.get("errors"))
+        t_queue = _int(tools.get("queue"))
+        t_tape = _int(tools.get("tape"))
+        t_presets = _int(tools.get("presets"))
+
+        version = payload.get("version")
+        server_ip = payload.get("server_ip")
+        server_name = payload.get("server_name")
+        version = str(version)[:32] if version else None
+        server_ip = str(server_ip)[:64] if server_ip else None
+        server_name = str(server_name)[:128] if server_name else None
+
+        had_activity = any((is_new, secs, c_menu, c_ghost, c_server, c_delete, c_errors))
+
+        async with self._write_lock:
+            db = await self._get_connection()
+
+            # 1) Гарантируем строку пользователя
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO objmapper_user_stats (discord_user_id, samp_nick, first_seen_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                """,
+                (str(discord_user_id), samp_nick),
+            )
+
+            # 2) Кумулятив + last-* (last-* — серверное время; ставим только когда было событие)
+            await db.execute(
+                """
+                UPDATE objmapper_user_stats SET
+                    samp_nick = COALESCE(?, samp_nick),
+                    last_seen_at = CURRENT_TIMESTAMP,
+                    last_version = COALESCE(?, last_version),
+                    last_server_ip = COALESCE(?, last_server_ip),
+                    last_server_name = COALESCE(?, last_server_name),
+                    sessions_total = sessions_total + ?,
+                    session_seconds_total = session_seconds_total + ?,
+                    menu_total = menu_total + ?,
+                    ghost_total = ghost_total + ?,
+                    server_total = server_total + ?,
+                    delete_total = delete_total + ?,
+                    errors_total = errors_total + ?,
+                    tool_queue_total = tool_queue_total + ?,
+                    tool_tape_total = tool_tape_total + ?,
+                    tool_presets_total = tool_presets_total + ?,
+                    last_launch_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE last_launch_at END,
+                    last_menu_at   = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_menu_at END,
+                    last_ghost_at  = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_ghost_at END,
+                    last_server_at = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_server_at END,
+                    last_delete_at = CASE WHEN ? > 0 THEN CURRENT_TIMESTAMP ELSE last_delete_at END
+                WHERE discord_user_id = ?
+                """,
+                (
+                    samp_nick, version, server_ip, server_name,
+                    is_new, secs, c_menu, c_ghost, c_server, c_delete, c_errors,
+                    t_queue, t_tape, t_presets,
+                    is_new, c_menu, c_ghost, c_server, c_delete,
+                    str(discord_user_id),
+                ),
+            )
+
+            # 3) Суточный ролл-ап (день — UTC, как date('now'))
+            await db.execute(
+                """
+                INSERT INTO objmapper_daily_stats
+                    (discord_user_id, day, launches, sessions, session_seconds, menu, ghost, server, delete_count, errors)
+                VALUES (?, date('now'), ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(discord_user_id, day) DO UPDATE SET
+                    launches = launches + excluded.launches,
+                    sessions = sessions + excluded.sessions,
+                    session_seconds = session_seconds + excluded.session_seconds,
+                    menu = menu + excluded.menu,
+                    ghost = ghost + excluded.ghost,
+                    server = server + excluded.server,
+                    delete_count = delete_count + excluded.delete_count,
+                    errors = errors + excluded.errors
+                """,
+                (
+                    str(discord_user_id), is_new, is_new, secs,
+                    c_menu, c_ghost, c_server, c_delete, c_errors,
+                ),
+            )
+
+            # 4) Популярность моделей
+            if isinstance(models, dict):
+                for mid, cnt in models.items():
+                    try:
+                        mid_int = int(mid)
+                    except (TypeError, ValueError):
+                        continue
+                    cnt_int = _int(cnt)
+                    if cnt_int <= 0:
+                        continue
+                    await db.execute(
+                        """
+                        INSERT INTO objmapper_model_usage (model_id, count, last_used_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(model_id) DO UPDATE SET
+                            count = count + excluded.count,
+                            last_used_at = CURRENT_TIMESTAMP
+                        """,
+                        (mid_int, cnt_int),
+                    )
+
+            # 5) Активность по часам (пиковые часы) — +1 за хартбит с активностью
+            if had_activity:
+                hour = datetime.utcnow().hour
+                await db.execute(
+                    """
+                    INSERT INTO objmapper_hourly_activity (hour, count) VALUES (?, 1)
+                    ON CONFLICT(hour) DO UPDATE SET count = count + 1
+                    """,
+                    (hour,),
+                )
+
+            await db.commit()
+
+    # ── ObjMapper: чтение статистики (для слэш-команды /objstats) ──
+
+    async def get_objmapper_active_counts(self) -> Dict[str, int]:
+        """DAU / WAU / MAU — уникальные активные пользователи за 1 / 7 / 30 дней."""
+        async def _distinct(since: str) -> int:
+            row = await self._fetchone(
+                "SELECT COUNT(DISTINCT discord_user_id) AS c FROM objmapper_daily_stats WHERE day >= date('now', ?)",
+                (since,),
+            )
+            return row["c"] if row else 0
+
+        return {
+            "dau": await _distinct("-0 days"),
+            "wau": await _distinct("-6 days"),
+            "mau": await _distinct("-29 days"),
+        }
+
+    async def get_objmapper_totals(self) -> Dict[str, int]:
+        """Сводные lifetime-числа по всем пользователям."""
+        row = await self._fetchone(
+            """
+            SELECT
+                COUNT(*) AS total_users,
+                COALESCE(SUM(ghost_total), 0) AS ghost,
+                COALESCE(SUM(server_total), 0) AS server,
+                COALESCE(SUM(delete_total), 0) AS deletes,
+                COALESCE(SUM(sessions_total), 0) AS sessions,
+                COALESCE(SUM(session_seconds_total), 0) AS session_seconds,
+                COALESCE(SUM(errors_total), 0) AS errors
+            FROM objmapper_user_stats
+            """
+        )
+        return dict(row) if row else {}
+
+    async def get_objmapper_new_returning(self, days: int = 7) -> Dict[str, int]:
+        """Новые (first_seen в окне) и вернувшиеся (старые, но активные в окне) за N дней."""
+        since = f"-{max(0, int(days) - 1)} days"
+        since_dt = f"-{int(days)} days"
+        new_row = await self._fetchone(
+            "SELECT COUNT(*) AS c FROM objmapper_user_stats WHERE first_seen_at >= datetime('now', ?)",
+            (since_dt,),
+        )
+        ret_row = await self._fetchone(
+            """
+            SELECT COUNT(DISTINCT d.discord_user_id) AS c
+            FROM objmapper_daily_stats d
+            JOIN objmapper_user_stats u ON u.discord_user_id = d.discord_user_id
+            WHERE d.day >= date('now', ?) AND u.first_seen_at < datetime('now', ?)
+            """,
+            (since, since_dt),
+        )
+        return {"new": new_row["c"] if new_row else 0, "returning": ret_row["c"] if ret_row else 0}
+
+    async def get_objmapper_period_counts(self, days: int = 30) -> Dict[str, int]:
+        """Суммы действий за период (N дней) из суточного ролл-апа."""
+        since = f"-{max(0, int(days) - 1)} days"
+        row = await self._fetchone(
+            """
+            SELECT
+                COALESCE(SUM(ghost), 0) AS ghost,
+                COALESCE(SUM(server), 0) AS server,
+                COALESCE(SUM(delete_count), 0) AS deletes,
+                COALESCE(SUM(session_seconds), 0) AS session_seconds,
+                COALESCE(SUM(sessions), 0) AS sessions
+            FROM objmapper_daily_stats WHERE day >= date('now', ?)
+            """,
+            (since,),
+        )
+        return dict(row) if row else {}
+
+    async def get_objmapper_version_distribution(self) -> List[Dict]:
+        """Распределение пользователей по версии скрипта (адопшен апдейтов)."""
+        rows = await self._fetchall(
+            """
+            SELECT COALESCE(last_version, '?') AS version, COUNT(*) AS count
+            FROM objmapper_user_stats
+            GROUP BY COALESCE(last_version, '?')
+            ORDER BY count DESC
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def get_objmapper_server_distribution(self, limit: int = 10) -> List[Dict]:
+        """Распределение пользователей по последнему SA-MP серверу."""
+        rows = await self._fetchall(
+            """
+            SELECT
+                COALESCE(last_server_name, last_server_ip, '?') AS server,
+                COUNT(*) AS count
+            FROM objmapper_user_stats
+            GROUP BY COALESCE(last_server_name, last_server_ip, '?')
+            ORDER BY count DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_objmapper_hourly(self) -> List[int]:
+        """Активность по 24 часам суток (UTC). Возвращает массив из 24 чисел."""
+        rows = await self._fetchall("SELECT hour, count FROM objmapper_hourly_activity")
+        buckets = [0] * 24
+        for r in rows:
+            h = r["hour"]
+            if isinstance(h, int) and 0 <= h < 24:
+                buckets[h] = r["count"]
+        return buckets
+
+    async def get_objmapper_user_stats(self, discord_user_id: str) -> Optional[Dict]:
+        """Полная статистика по Discord-пользователю."""
+        row = await self._fetchone(
+            "SELECT * FROM objmapper_user_stats WHERE discord_user_id = ?",
+            (str(discord_user_id),),
+        )
+        return dict(row) if row else None
+
+    async def get_objmapper_user_stats_by_nick(self, nick: str) -> Optional[Dict]:
+        """Статистика по SA-MP нику (без учёта регистра)."""
+        row = await self._fetchone(
+            "SELECT * FROM objmapper_user_stats WHERE samp_nick = ? COLLATE NOCASE",
+            (nick,),
+        )
+        return dict(row) if row else None
+
+    async def get_objmapper_top_users(self, metric: str = "objects", limit: int = 10) -> List[Dict]:
+        """
+        Топ пользователей. metric ∈ objects|sessions|time.
+        objects = ghost_total + server_total.
+        """
+        order = {
+            "objects": "(ghost_total + server_total)",
+            "sessions": "sessions_total",
+            "time": "session_seconds_total",
+        }.get(metric, "(ghost_total + server_total)")
+        rows = await self._fetchall(
+            f"""
+            SELECT discord_user_id, samp_nick, ghost_total, server_total,
+                   sessions_total, session_seconds_total,
+                   (ghost_total + server_total) AS objects_total
+            FROM objmapper_user_stats
+            ORDER BY {order} DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_objmapper_top_models(self, limit: int = 10) -> List[Dict]:
+        """Топ самых используемых моделей объектов."""
+        rows = await self._fetchall(
+            "SELECT model_id, count FROM objmapper_model_usage ORDER BY count DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [dict(r) for r in rows]
