@@ -248,6 +248,28 @@ CREATE TABLE IF NOT EXISTS bot_settings (
 """
 
 
+# ── Заявки на получение ролей (порт из lspd-manager) ──
+
+CREATE_REQUESTS_TABLE = """
+CREATE TABLE IF NOT EXISTS requests (
+    message_id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    embed TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    finished_by INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP,
+    reject_reason TEXT
+);
+"""
+
+CREATE_REQUESTS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+"""
+
+
+
 async def initialize_database(db_path: str) -> None:
     """
     Инициализация базы данных - создание всех таблиц и индексов
@@ -306,6 +328,12 @@ async def initialize_database(db_path: str) -> None:
 
             await db.execute(CREATE_BOT_SETTINGS_TABLE)
             logger.debug("Таблица bot_settings создана")
+
+            await db.execute(CREATE_REQUESTS_TABLE)
+            for index_sql in CREATE_REQUESTS_INDEX.split(';'):
+                if index_sql.strip():
+                    await db.execute(index_sql)
+            logger.debug("Таблица requests создана")
 
             await db.commit()
             logger.info("База данных успешно инициализирована")

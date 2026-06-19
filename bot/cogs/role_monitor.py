@@ -36,6 +36,12 @@ class RoleMonitorCog(commands.Cog):
         # Задержка перед синхронизацией (секунды)
         self.debounce_delay = 5
 
+        # Счётчик повторных попыток при транзиентных сбоях (неполные данные
+        # с source-серверов). Формат: {user_id: число_попыток}
+        self.retry_counts: Dict[int, int] = {}
+        # Максимум повторов на один эпизод, чтобы не зациклиться при стойком сбое
+        self.max_retries = 3
+
     async def cog_load(self):
         """Вызывается когда Cog загружается"""
         logger.info("RoleMonitorCog загружен")
@@ -186,20 +192,55 @@ class RoleMonitorCog(commands.Cog):
                             )
                         except Exception as e:  # noqa: BLE001
                             logger.warning(f"audit roles_synced (auto) failed: {e}")
+                    # Успех — сбрасываем счётчик попыток
+                    self.retry_counts.pop(user_id, None)
+                elif getattr(result, "data_incomplete", False):
+                    # Транзиентный сбой чтения source-серверов — повторяем попытку,
+                    # пока не исчерпан лимит. Снятие ролей было подавлено в движке.
+                    self._maybe_retry(user_id)
                 else:
+                    # Постоянная ошибка (нет прав/иерархия и т.п.) — не зацикливаемся
                     logger.warning(
                         f"Автосинхронизация для {user_id} завершена с ошибками: "
                         f"{result.errors}"
                     )
+                    self.retry_counts.pop(user_id, None)
 
             except Exception as e:
                 logger.error(
                     f"Ошибка автосинхронизации для пользователя {user_id}: {e}",
                     exc_info=True
                 )
+                # Неожиданная ошибка тоже транзиентная — пробуем повторить
+                self._maybe_retry(user_id)
 
             # Небольшая задержка между синхронизациями
             await asyncio.sleep(0.5)
+
+    def _maybe_retry(self, user_id: int):
+        """
+        Запланировать повторную попытку синхронизации при транзиентном сбое.
+
+        Повторяет не более self.max_retries раз на эпизод. Повтор ставится через
+        обычный debounce (schedule_sync), т.е. сработает не сразу, а спустя
+        debounce_delay секунд.
+        """
+        attempts = self.retry_counts.get(user_id, 0) + 1
+        if attempts > self.max_retries:
+            logger.warning(
+                f"Исчерпан лимит повторов ({self.max_retries}) для {user_id}, "
+                f"синхронизация отложена до следующего изменения ролей"
+            )
+            self.retry_counts.pop(user_id, None)
+            return
+
+        self.retry_counts[user_id] = attempts
+        logger.info(
+            f"Планирую повтор синхронизации для {user_id} "
+            f"(попытка {attempts}/{self.max_retries})"
+        )
+        # Повторно ставим в очередь с debounce
+        self.pending_syncs[user_id] = datetime.now()
 
     @process_pending_syncs.before_loop
     async def before_process_pending_syncs(self):

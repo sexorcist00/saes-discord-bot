@@ -8,7 +8,9 @@
       "target_server_id": "1270044270111494144",
       "target_role_id": "1454078570463756398",
       "description": "Los Santos Police Department",
-      "enabled": true
+      "enabled": true,
+      "source_of_truth": "fraction_discord",
+      "forum_rank": ""
     }
   ]
 }

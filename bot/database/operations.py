@@ -1102,3 +1102,93 @@ class DatabaseOperations:
             (int(limit),),
         )
         return [dict(r) for r in rows]
+
+    # ============ Заявки на получение ролей ============
+
+    async def create_request(
+        self,
+        message_id: int,
+        user_id: int,
+        embed: dict,
+    ) -> None:
+        """
+        Создать заявку на получение ролей.
+
+        Args:
+            message_id: ID сообщения с заявкой в админ-канале (первичный ключ)
+            user_id: ID пользователя, подавшего заявку
+            embed: Словарь embed (Embed.to_dict()), сериализуется в JSON
+        """
+        query = """
+        INSERT INTO requests (message_id, user_id, embed, status, created_at)
+        VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+        """
+        await self._execute(query, (message_id, user_id, json.dumps(embed)))
+        logger.debug(f"Создана заявка {message_id} от пользователя {user_id}")
+
+    async def set_request_approved(self, message_id: int, finished_by: int) -> None:
+        """Пометить заявку как одобренную"""
+        query = """
+        UPDATE requests
+        SET status = 'approved', finished_by = ?, finished_at = CURRENT_TIMESTAMP
+        WHERE message_id = ?
+        """
+        await self._execute(query, (finished_by, message_id))
+        logger.debug(f"Заявка {message_id} одобрена пользователем {finished_by}")
+
+    async def set_request_rejected(
+        self,
+        message_id: int,
+        finished_by: int,
+        reject_reason: str,
+    ) -> None:
+        """Пометить заявку как отклонённую с указанием причины"""
+        query = """
+        UPDATE requests
+        SET status = 'rejected', finished_by = ?, finished_at = CURRENT_TIMESTAMP,
+            reject_reason = ?
+        WHERE message_id = ?
+        """
+        await self._execute(query, (finished_by, reject_reason, message_id))
+        logger.debug(f"Заявка {message_id} отклонена пользователем {finished_by}")
+
+    async def get_pending_requests(self) -> List[Dict]:
+        """
+        Получить все заявки в статусе pending (для перевешивания view на on_ready).
+
+        Returns:
+            Список заявок с распарсенным полем embed
+        """
+        query = "SELECT * FROM requests WHERE status = 'pending' ORDER BY created_at"
+        rows = await self._fetchall(query)
+        return [self._parse_request_row(row) for row in rows]
+
+    async def get_requests_by_user(self, user_id: int, limit: int = 50) -> List[Dict]:
+        """
+        Получить историю заявок пользователя (для /search).
+
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество записей
+
+        Returns:
+            Список заявок с распарсенным полем embed
+        """
+        query = """
+        SELECT * FROM requests
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """
+        rows = await self._fetchall(query, (user_id, limit))
+        return [self._parse_request_row(row) for row in rows]
+
+    @staticmethod
+    def _parse_request_row(row) -> Dict:
+        """Преобразовать строку заявки в словарь с распарсенным embed"""
+        request = dict(row)
+        try:
+            request['embed'] = json.loads(request['embed'])
+        except (json.JSONDecodeError, TypeError):
+            request['embed'] = {}
+        return request

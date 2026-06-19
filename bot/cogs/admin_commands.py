@@ -448,6 +448,71 @@ class AdminCommandsCog(commands.Cog):
             logger.error(f"Ошибка удаления маппинга: {e}", exc_info=True)
             await ctx.send(embed=create_error_embed(f"Ошибка: {e}"), ephemeral=True)
 
+    @role_admin.command(
+        name="set_source",
+        description="Задать источник истины для маппинга (fraction_discord/forum/manual)",
+    )
+    @app_commands.describe(
+        mapping_id="ID маппинга",
+        source="Источник истины: fraction_discord, forum или manual",
+        forum_rank="Название ранга на форуме (только для source=forum)",
+    )
+    async def set_source(
+        self,
+        ctx: commands.Context,
+        mapping_id: str,
+        source: str,
+        *,
+        forum_rank: str = "",
+    ):
+        """Переключить источник истины маппинга."""
+        from bot.config import SOURCE_OF_TRUTH_VALUES
+
+        source = source.strip().lower()
+        if source not in SOURCE_OF_TRUTH_VALUES:
+            await ctx.send(
+                embed=create_error_embed(
+                    f"Недопустимый источник истины. Допустимо: "
+                    f"{', '.join(SOURCE_OF_TRUTH_VALUES)}."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        mapping = self.bot.config.get_mapping_by_id(mapping_id)
+        if not mapping:
+            await ctx.send(
+                embed=create_error_embed(f"Маппинг `{mapping_id}` не найден."),
+                ephemeral=True,
+            )
+            return
+
+        if source == "forum" and not (forum_rank or mapping.forum_rank):
+            await ctx.send(
+                embed=create_error_embed(
+                    "Для источника `forum` нужно указать forum_rank."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        mapping.source_of_truth = source
+        if forum_rank:
+            mapping.forum_rank = forum_rank
+        self.bot.config.update_role_mapping(mapping)
+
+        await ctx.send(
+            embed=create_success_embed(
+                f"Источник истины для `{mapping_id}` → **{source}**"
+                + (f" (ранг: {mapping.forum_rank})" if source == "forum" else ""),
+                "Источник истины обновлён",
+            ),
+            ephemeral=True,
+        )
+        logger.info(
+            f"source_of_truth маппинга {mapping_id} → {source} (изменил {ctx.author})"
+        )
+
     @role_admin.command(name="reload_config", description="Перезагрузить конфигурацию из файлов")
     async def reload_config(self, ctx: commands.Context):
         """Перезагрузить конфигурацию из файлов"""

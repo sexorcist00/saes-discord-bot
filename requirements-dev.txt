@@ -1,0 +1,5 @@
+# Зависимости для разработки и тестирования
+-r requirements.txt
+
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
