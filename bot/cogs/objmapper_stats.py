@@ -384,7 +384,9 @@ class ObjMapperStatsCog(commands.Cog):
         return embed
 
     # ───────────────────────────── user ─────────────────────────────
-    def _render_user_embed(self, stats: Optional[dict], avatar_user) -> discord.Embed:
+    def _render_user_embed(
+        self, stats: Optional[dict], avatar_user, top_models: Optional[list] = None
+    ) -> discord.Embed:
         if not stats:
             return create_info_embed("Нет данных телеметрии для этого пользователя.", "ObjMapper — пользователь")
 
@@ -449,6 +451,19 @@ class ObjMapperStatsCog(commands.Cog):
             ),
             inline=False,
         )
+        if top_models:
+            lines = []
+            for i, m in enumerate(top_models, 1):
+                placed = m.get("placed", 0) or 0
+                g = m.get("ghost_count", 0) or 0
+                s = m.get("server_count", 0) or 0
+                d = m.get("delete_count", 0) or 0
+                lines.append(
+                    f"**{i}.** `{m.get('model_id')}` — поставил **{placed}** "
+                    f"(ghost {g} / server {s})" + (f", удалил {d}" if d else "")
+                )
+            embed.add_field(name="🧱 Топ моделей юзера", value="\n".join(lines), inline=False)
+
         srv = stats.get("last_server_name") or stats.get("last_server_ip") or "—"
         embed.add_field(
             name="ℹ️ Прочее",
@@ -463,12 +478,15 @@ class ObjMapperStatsCog(commands.Cog):
 
     async def build_user_by_id(self, discord_user_id: str) -> discord.Embed:
         stats = await self.bot.db.get_objmapper_user_stats(str(discord_user_id))
+        top_models = await self.bot.db.get_objmapper_user_top_models(
+            str(discord_user_id), limit=5
+        )
         avatar_user = None
         try:
             avatar_user = self.bot.get_user(int(discord_user_id))
         except (TypeError, ValueError):
             avatar_user = None
-        return self._render_user_embed(stats, avatar_user)
+        return self._render_user_embed(stats, avatar_user, top_models)
 
     # ───────────────────────────── top ──────────────────────────────
     async def build_top(self, metric: Optional[str]) -> discord.Embed:

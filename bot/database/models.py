@@ -214,6 +214,21 @@ CREATE TABLE IF NOT EXISTS objmapper_model_usage (
 );
 """
 
+# Популярность моделей в разрезе пользователя (lifetime): что именно и сколько
+# ставил/удалял конкретный человек. ghost/server/delete разнесены, чтобы видеть
+# намерение (локальное превью vs реальный серверный объект vs удаление).
+CREATE_OBJMAPPER_USER_MODEL_USAGE_TABLE = """
+CREATE TABLE IF NOT EXISTS objmapper_user_model_usage (
+    discord_user_id TEXT NOT NULL,
+    model_id INTEGER NOT NULL,
+    ghost_count INTEGER NOT NULL DEFAULT 0,
+    server_count INTEGER NOT NULL DEFAULT 0,
+    delete_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TIMESTAMP,
+    PRIMARY KEY (discord_user_id, model_id)
+);
+"""
+
 # Глобальная активность по часам суток (0..23) — пиковые часы.
 CREATE_OBJMAPPER_HOURLY_ACTIVITY_TABLE = """
 CREATE TABLE IF NOT EXISTS objmapper_hourly_activity (
@@ -285,6 +300,7 @@ async def initialize_database(db_path: str) -> None:
             await db.execute(CREATE_OBJMAPPER_DAILY_STATS_TABLE)
             await db.execute(CREATE_OBJMAPPER_DAILY_STATS_INDEX)
             await db.execute(CREATE_OBJMAPPER_MODEL_USAGE_TABLE)
+            await db.execute(CREATE_OBJMAPPER_USER_MODEL_USAGE_TABLE)
             await db.execute(CREATE_OBJMAPPER_HOURLY_ACTIVITY_TABLE)
             logger.debug("Таблицы телеметрии ObjMapper созданы")
 

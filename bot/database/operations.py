@@ -831,25 +831,52 @@ class DatabaseOperations:
                 ),
             )
 
-            # 4) Популярность моделей
+            # 4) Популярность моделей — глобально (objmapper_model_usage) и в разрезе
+            #    пользователя (objmapper_user_model_usage, разбивка ghost/server/delete).
+            #    Новый формат значения: {"g":ghost,"s":server,"d":delete}.
+            #    Старые клиенты шлют плоский int (= число установок) — кладём в ghost.
             if isinstance(models, dict):
-                for mid, cnt in models.items():
+                for mid, val in models.items():
                     try:
                         mid_int = int(mid)
                     except (TypeError, ValueError):
                         continue
-                    cnt_int = _int(cnt)
-                    if cnt_int <= 0:
+                    if isinstance(val, dict):
+                        g = _int(val.get("g"))
+                        s = _int(val.get("s"))
+                        d = _int(val.get("d"))
+                    else:
+                        g, s, d = _int(val), 0, 0
+                    placed = g + s
+                    if placed <= 0 and d <= 0:
                         continue
+
+                    # Глобальный топ популярности = установки (ghost+server), как и раньше.
+                    if placed > 0:
+                        await db.execute(
+                            """
+                            INSERT INTO objmapper_model_usage (model_id, count, last_used_at)
+                            VALUES (?, ?, CURRENT_TIMESTAMP)
+                            ON CONFLICT(model_id) DO UPDATE SET
+                                count = count + excluded.count,
+                                last_used_at = CURRENT_TIMESTAMP
+                            """,
+                            (mid_int, placed),
+                        )
+
+                    # Разрез по пользователю: что именно и сколько ставил/удалял.
                     await db.execute(
                         """
-                        INSERT INTO objmapper_model_usage (model_id, count, last_used_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                        ON CONFLICT(model_id) DO UPDATE SET
-                            count = count + excluded.count,
+                        INSERT INTO objmapper_user_model_usage
+                            (discord_user_id, model_id, ghost_count, server_count, delete_count, last_used_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(discord_user_id, model_id) DO UPDATE SET
+                            ghost_count  = ghost_count  + excluded.ghost_count,
+                            server_count = server_count + excluded.server_count,
+                            delete_count = delete_count + excluded.delete_count,
                             last_used_at = CURRENT_TIMESTAMP
                         """,
-                        (mid_int, cnt_int),
+                        (str(discord_user_id), mid_int, g, s, d),
                     )
 
             # 5) Активность по часам (пиковые часы) — +1 за хартбит с активностью
@@ -1013,10 +1040,30 @@ class DatabaseOperations:
         return [dict(r) for r in rows]
 
     async def get_objmapper_top_models(self, limit: int = 10) -> List[Dict]:
-        """Топ самых используемых моделей объектов."""
+        """Топ самых используемых моделей объектов (глобально)."""
         rows = await self._fetchall(
             "SELECT model_id, count FROM objmapper_model_usage ORDER BY count DESC LIMIT ?",
             (int(limit),),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_objmapper_user_top_models(
+        self, discord_user_id: str, limit: int = 5
+    ) -> List[Dict]:
+        """
+        Топ моделей конкретного пользователя с разбивкой ghost/server/delete.
+        Сортировка по числу установок (ghost+server), затем по удалениям.
+        """
+        rows = await self._fetchall(
+            """
+            SELECT model_id, ghost_count, server_count, delete_count,
+                   (ghost_count + server_count) AS placed
+            FROM objmapper_user_model_usage
+            WHERE discord_user_id = ?
+            ORDER BY placed DESC, delete_count DESC, last_used_at DESC
+            LIMIT ?
+            """,
+            (str(discord_user_id), int(limit)),
         )
         return [dict(r) for r in rows]
 
