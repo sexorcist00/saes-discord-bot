@@ -413,7 +413,9 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
     except Exception as e:  # noqa: BLE001
         logger.warning("fire ws error user=%s: %s", user_id, e)
     finally:
-        if user_id:
+        # Отключаем воркера ТОЛЬКО если в реестре всё ещё ЭТОТ сокет — иначе при
+        # реконнекте finally старого соединения снёс бы только что подключившегося.
+        if user_id and bot.fire_ws.get(user_id) is ws:
             fire.worker_disconnect(user_id)
             bot.fire_ws.pop(user_id, None)
             await fire_push_dispatch(bot)   # реквью раздать оставшимся
