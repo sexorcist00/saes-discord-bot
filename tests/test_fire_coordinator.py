@@ -188,6 +188,17 @@ def test_cells_near_radius_filtering():
     assert len(out["cells_near"]) == 1
 
 
+def test_sync_caps_expose_grid_for_clients():
+    # Клиенты квантуют кандидаты спреда той же сеткой — caps должны её отдавать.
+    coord, _ = make_coord(grid=2.0, grid_z=2.0, spread_min_heat=40, max_cells=60)
+    out = coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP)
+    caps = out["caps"]
+    assert caps["grid"] == 2.0
+    assert caps["gridZ"] == 2.0
+    assert caps["spreadMinHeat"] == 40
+    assert caps["maxCells"] == 60
+
+
 def test_max_cells_cap_denies_claim():
     coord, _ = make_coord(max_cells=2)
     res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)

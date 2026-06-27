@@ -323,7 +323,13 @@ class FireCoordinator:
             "denied": denied,
             "removes": removes,
             "cells_near": cells_near,
-            "caps": {"maxCells": self.cfg.max_cells},
+            # Клиент квантует кандидаты спреда той же сеткой → gridKey совпадают у всех.
+            "caps": {
+                "maxCells": self.cfg.max_cells,
+                "grid": self.cfg.grid,
+                "gridZ": self.cfg.grid_z,
+                "spreadMinHeat": self.cfg.spread_min_heat,
+            },
         }
 
     # ── Удаление: маршрутизация ──────────────────────────────────────────────
