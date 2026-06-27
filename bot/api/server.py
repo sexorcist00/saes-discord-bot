@@ -395,9 +395,14 @@ async def handle_fire_admin(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "snapshot": snap})
     if action == "reset":
         n = fire.reset(server_ip)
-        logger.info("fire admin reset by user=%s: снято %d ячеек (server_ip=%s)",
+        logger.info("fire admin reset by user=%s: помечено %d ячеек на тушение (server_ip=%s)",
                     link["discord_user_id"], n, server_ip)
         return web.json_response({"ok": True, "reset": n})
+    if action == "wipe":
+        n = fire.wipe(server_ip)
+        logger.info("fire admin wipe by user=%s: снято %d ячеек (server_ip=%s)",
+                    link["discord_user_id"], n, server_ip)
+        return web.json_response({"ok": True, "wiped": n})
     return web.json_response({"error": "BAD_ACTION"}, status=400)
 
 

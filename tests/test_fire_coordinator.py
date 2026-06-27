@@ -199,6 +199,22 @@ def test_sync_caps_expose_grid_for_clients():
     assert caps["maxCells"] == 60
 
 
+def test_wipe_drops_all_cells():
+    # /firewipe: жёсткий сброс — ячейки полностью уходят из реестра (не extinguishing-хвосты).
+    coord, _ = make_coord()
+    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
+    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
+               placed=[{"gridKey": res["gridKey"], "serverId": 5}])
+    assert len(coord.cells) == 1
+    n = coord.wipe(IP)
+    assert n == 1
+    assert len(coord.cells) == 0
+    assert len(coord.incidents) == 0
+    # cells_near после wipe пуст → синих квадратов в оверлее не остаётся
+    out = coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP)
+    assert out["cells_near"] == []
+
+
 def test_max_cells_cap_denies_claim():
     coord, _ = make_coord(max_cells=2)
     res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)

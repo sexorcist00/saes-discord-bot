@@ -446,6 +446,18 @@ class FireCoordinator:
             "clients": len(self.clients),
         }
 
+    def wipe(self, server_ip: Optional[str] = None) -> int:
+        """Жёсткий сброс: ПОЛНОСТЬЮ выбросить ячейки из реестра (исчезают из cells_near,
+        спред прекращается, синих extinguishing-хвостов не остаётся). Удаление самих
+        серверных объектов делает клиент (/dobjects). Возвращает число снятых ячеек."""
+        keys = [k for k, c in self.cells.items()
+                if server_ip is None or c.server_ip == server_ip]
+        for k in keys:
+            self.cells.pop(k, None)
+        self._gc_incidents()
+        logger.info("fire wipe: снято %d ячеек (server_ip=%s)", len(keys), server_ip)
+        return len(keys)
+
     def reset(self, server_ip: Optional[str] = None) -> int:
         """Сбросить пожар(ы). Возвращает число снятых ячеек (для уборки клиентами —
         они увидят пропажу в cells_near; реальное удаление объектов = отдельный проход
