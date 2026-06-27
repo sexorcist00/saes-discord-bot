@@ -325,6 +325,25 @@ class Config:
                 logger.warning(f"Некорректный ID роли ObjMapper в конфиге: {rid!r}")
         return result
 
+    # ============ Геттеры для Fire (система пожара ObjMapper) ============
+
+    def _fire_section(self) -> Dict[str, Any]:
+        """Секция fire внутри objmapper (может отсутствовать)."""
+        return self._objmapper_section().get('fire', {}) or {}
+
+    def is_fire_enabled(self) -> bool:
+        """Включена ли система пожара (по умолчанию выключена)."""
+        return bool(self._fire_section().get('enabled', False))
+
+    def get_fire_params(self) -> Dict[str, Any]:
+        """Параметры координатора пожара (только заданные ключи; остальное — дефолты
+        FireConfig). Возвращаем сырой dict, main.py соберёт FireConfig(**params)."""
+        sec = self._fire_section()
+        allowed = ('grid', 'grid_z', 'max_cells', 'cooldown_s', 'claim_ttl_s',
+                   'merge_dist', 'heat_max', 'heat_ramp_per_s', 'water_factor',
+                   'client_stale_s', 'remove_retry_s', 'near_radius', 'spread_min_heat')
+        return {k: sec[k] for k in allowed if k in sec and sec[k] is not None}
+
     # ============ Геттеры для форума (источник истины) ============
 
     def _forum_section(self) -> Dict[str, Any]:

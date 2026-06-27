@@ -52,6 +52,10 @@ class RoleSyncBot(commands.Bot):
         # HTTP API авторизации ObjMapper (aiohttp runner, создаётся в setup_hook)
         self.objmapper_api_runner = None
 
+        # Координатор пожара ObjMapper + его фоновая tick-задача (создаются в setup_hook)
+        self.fire = None
+        self._fire_task = None
+
         # Audit-логгер важных событий (канал настраивается через /setup)
         self.audit = None
 
@@ -126,6 +130,12 @@ class RoleSyncBot(commands.Bot):
             try:
                 await self.load_extension("bot.cogs.objmapper_commands")
                 await self.load_extension("bot.cogs.objmapper_stats")
+                # Координатор пожара создаём ДО start_api (build_app читает bot.fire).
+                if self.config.is_fire_enabled():
+                    from bot.services.fire_coordinator import FireCoordinator, FireConfig
+                    self.fire = FireCoordinator(FireConfig(**self.config.get_fire_params()))
+                    self._fire_task = asyncio.create_task(self._fire_tick_loop())
+                    logger.info("Fire: координатор пожара запущен")
                 from bot.api.server import start_api
                 self.objmapper_api_runner = await start_api(self)
                 logger.info("ObjMapper: cog и HTTP API инициализированы")
@@ -135,6 +145,16 @@ class RoleSyncBot(commands.Bot):
             logger.info("ObjMapper API отключён в конфиге")
 
         logger.info("Setup hook завершен")
+
+    async def _fire_tick_loop(self):
+        """Фоновый tick координатора пожара (раз в секунду): heat, claim-TTL, GC."""
+        import asyncio as _asyncio
+        while True:
+            await _asyncio.sleep(1.0)
+            try:
+                self.fire.tick()
+            except Exception as e:  # noqa: BLE001 — тик не должен ронять бота
+                logger.error(f"Fire tick error: {e}", exc_info=True)
 
     async def _cache_role_mappings(self):
         """Кешировать маппинги ролей в базе данных"""
@@ -247,6 +267,14 @@ class RoleSyncBot(commands.Bot):
     async def close(self):
         """Корректное закрытие бота"""
         logger.info("Закрытие бота...")
+
+        # Останавливаем фоновую tick-задачу пожара
+        if self._fire_task:
+            self._fire_task.cancel()
+            try:
+                await self._fire_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
         # Останавливаем HTTP API ObjMapper
         if self.objmapper_api_runner:
