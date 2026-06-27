@@ -12,6 +12,7 @@ HTTP API авторизации ObjMapper.
      перепроверка членства в сервере и наличия хотя бы одной разрешённой роли.
 """
 
+import json
 import time
 import uuid
 from typing import List, Optional, Tuple
@@ -317,58 +318,107 @@ def _fire_or_503(request: web.Request):
     return fire, None
 
 
-async def handle_fire_sync(request: web.Request) -> web.Response:
-    """POST /api/objmapper/fire/sync — основной канал клиента (репорт+заявки→задания)."""
-    fire, err = _fire_or_503(request)
-    if err:
-        return err
-    link, err = await _bearer_link(request)
-    if err:
-        return err
-    data, err = await _read_json_dict(request)
-    if err:
-        return err
+# ── WebSocket: воркер-пул + раздача заданий ─────────────────────────────────
+#  Постоянное соединение каждого клиента-воркера. Бэкенд пушит задания (place/remove)
+#  наименее загруженному in-range воркеру (балансировка в координаторе). Сообщения —
+#  JSON-текст. Реестр сокетов живёт на bot.fire_ws {user_id -> ws}.
 
-    server_ip = str(data.get("server_ip") or "").strip()
-    if not server_ip:
-        return web.json_response({"error": "NO_SERVER"}, status=400)
-    pos = data.get("pos") or {}
-    if not isinstance(pos, dict):
-        return web.json_response({"error": "BAD_POS"}, status=400)
-
-    res = fire.sync(
-        str(link["discord_user_id"]), link.get("samp_nick", ""), pos, server_ip,
-        str(data.get("server_name") or ""),
-        claims=data.get("claims") or [], placed=data.get("placed") or [],
-        failed=data.get("failed") or [], water=data.get("water") or [],
-        removed=data.get("removed") or [],
-    )
-    return web.json_response(res)
-
-
-async def handle_fire_ignite(request: web.Request) -> web.Response:
-    """POST /api/objmapper/fire/ignite — регистрация первичного очага от «источника»."""
-    fire, err = _fire_or_503(request)
-    if err:
-        return err
-    link, err = await _bearer_link(request)
-    if err:
-        return err
-    data, err = await _read_json_dict(request)
-    if err:
-        return err
-
-    server_ip = str(data.get("server_ip") or "").strip()
-    if not server_ip:
-        return web.json_response({"error": "NO_SERVER"}, status=400)
+async def _ws_send(ws, obj) -> bool:
+    if ws is None or ws.closed:
+        return False
     try:
-        x, y, z = float(data["x"]), float(data["y"]), float(data["z"])
-        nx, ny, nz = float(data.get("nx", 0)), float(data.get("ny", 0)), float(data.get("nz", 1))
-    except (KeyError, TypeError, ValueError):
-        return web.json_response({"error": "BAD_COORDS"}, status=400)
+        await ws.send_str(json.dumps(obj))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
-    res = fire.ignite(str(link["discord_user_id"]), x, y, z, nx, ny, nz, server_ip)
-    return web.json_response(res)
+
+async def fire_push_dispatch(bot) -> None:
+    """Раздать pending-задания и разослать их назначенным воркерам по сокетам."""
+    if not getattr(bot, "fire", None):
+        return
+    for uid, payload in bot.fire.dispatch():
+        await _ws_send(bot.fire_ws.get(uid), {"t": "job", "job": payload})
+
+
+async def fire_push_states(bot) -> None:
+    """Разослать каждому воркеру состояние ближних очагов (для оверлея/спреда)."""
+    if not getattr(bot, "fire", None):
+        return
+    for uid in list(bot.fire_ws.keys()):
+        await _ws_send(bot.fire_ws.get(uid), {"t": "state", **bot.fire.state_for(uid)})
+
+
+async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
+    """GET /api/objmapper/fire/ws — постоянный канал воркера (Bearer в hello-сообщении)."""
+    bot = request.app["bot"]
+    fire = request.app.get("fire")
+    ws = web.WebSocketResponse(heartbeat=25, max_msg_size=_FIRE_MAX_BODY)
+    await ws.prepare(request)
+    if fire is None:
+        await _ws_send(ws, {"t": "error", "reason": "FIRE_DISABLED"})
+        await ws.close()
+        return ws
+
+    user_id = None
+    try:
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                if msg.type == web.WSMsgType.ERROR:
+                    break
+                continue
+            try:
+                data = json.loads(msg.data)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(data, dict):
+                continue
+            t = data.get("t")
+
+            # Первое сообщение — hello с токеном (авторизация воркера).
+            if user_id is None:
+                if t != "hello":
+                    continue
+                link = await bot.db.get_objmapper_link_by_token(str(data.get("token") or ""))
+                if not link:
+                    await _ws_send(ws, {"t": "error", "reason": "UNAUTHORIZED"})
+                    break
+                user_id = str(link["discord_user_id"])
+                server_ip = str(data.get("server_ip") or "")
+                fire.worker_connect(user_id, link.get("samp_nick", ""), server_ip, data.get("pos") or {})
+                bot.fire_ws[user_id] = ws
+                await _ws_send(ws, {"t": "welcome", "caps": fire.caps()})
+                await fire_push_dispatch(bot)
+                await _ws_send(ws, {"t": "state", **fire.state_for(user_id)})
+                continue
+
+            sip = str(data.get("server_ip") or "")
+            if t == "pos":
+                fire.worker_pos(user_id, sip, data.get("pos") or {})
+            elif t == "ignite":
+                try:
+                    fire.ignite(user_id, float(data["x"]), float(data["y"]), float(data["z"]),
+                                float(data.get("nx", 0)), float(data.get("ny", 0)),
+                                float(data.get("nz", 1)), sip)
+                except (KeyError, TypeError, ValueError):
+                    pass
+            elif t == "propose":
+                fire.propose(user_id, sip, data.get("cells") or [])
+            elif t == "done":
+                fire.job_done(user_id, str(data.get("id")), bool(data.get("ok")), data.get("serverId"))
+            elif t == "water":
+                fire.apply_water(sip, data.get("cells") or [])
+            # после любой мутации — раздать задания (включая только что появившиеся)
+            await fire_push_dispatch(bot)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fire ws error user=%s: %s", user_id, e)
+    finally:
+        if user_id:
+            fire.worker_disconnect(user_id)
+            bot.fire_ws.pop(user_id, None)
+            await fire_push_dispatch(bot)   # реквью раздать оставшимся
+            logger.info("fire ws closed user=%s", user_id)
+    return ws
 
 
 async def handle_fire_admin(request: web.Request) -> web.Response:
@@ -393,11 +443,6 @@ async def handle_fire_admin(request: web.Request) -> web.Response:
         snap = fire.snapshot(server_ip)
         logger.info("fire admin status by user=%s: %s", link["discord_user_id"], snap)
         return web.json_response({"ok": True, "snapshot": snap})
-    if action == "reset":
-        n = fire.reset(server_ip)
-        logger.info("fire admin reset by user=%s: помечено %d ячеек на тушение (server_ip=%s)",
-                    link["discord_user_id"], n, server_ip)
-        return web.json_response({"ok": True, "reset": n})
     if action == "wipe":
         n = fire.wipe(server_ip)
         logger.info("fire admin wipe by user=%s: снято %d ячеек (server_ip=%s)",
@@ -419,8 +464,7 @@ def build_app(bot) -> web.Application:
             web.get("/api/objmapper/validate", handle_validate),
             web.get("/api/objmapper/avatar", handle_avatar),
             web.post("/api/objmapper/telemetry", handle_telemetry),
-            web.post("/api/objmapper/fire/sync", handle_fire_sync),
-            web.post("/api/objmapper/fire/ignite", handle_fire_ignite),
+            web.get("/api/objmapper/fire/ws", handle_fire_ws),
             web.post("/api/objmapper/fire/admin", handle_fire_admin),
         ]
     )

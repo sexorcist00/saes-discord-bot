@@ -55,6 +55,8 @@ class RoleSyncBot(commands.Bot):
         # Координатор пожара ObjMapper + его фоновая tick-задача (создаются в setup_hook)
         self.fire = None
         self._fire_task = None
+        # Реестр WebSocket-воркеров пожара: user_id -> WebSocketResponse (заполняется в api/server)
+        self.fire_ws = {}
 
         # Audit-логгер важных событий (канал настраивается через /setup)
         self.audit = None
@@ -147,12 +149,16 @@ class RoleSyncBot(commands.Bot):
         logger.info("Setup hook завершен")
 
     async def _fire_tick_loop(self):
-        """Фоновый tick координатора пожара (раз в секунду): heat, claim-TTL, GC."""
+        """Фоновый tick пожара (раз в секунду): heat/реквью/GC + раздача заданий
+        воркерам по сокетам и рассылка состояния очагов."""
         import asyncio as _asyncio
+        from bot.api.server import fire_push_dispatch, fire_push_states
         while True:
             await _asyncio.sleep(1.0)
             try:
                 self.fire.tick()
+                await fire_push_dispatch(self)
+                await fire_push_states(self)
             except Exception as e:  # noqa: BLE001 — тик не должен ронять бота
                 logger.error(f"Fire tick error: {e}", exc_info=True)
 

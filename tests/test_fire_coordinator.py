@@ -1,15 +1,14 @@
-"""Юнит-тесты FireCoordinator — чистая логика, без игры/сети/БД."""
+"""Юнит-тесты FireCoordinator (модель воркер-пул + очередь заданий)."""
 
 import pytest
 
 from bot.services.fire_coordinator import (
     FireCoordinator, FireConfig,
-    STATE_PROPOSED, STATE_BURNING, STATE_EXTINGUISHING, STATE_OUT,
+    STATE_BURNING, STATE_EXTINGUISHING, STATE_OUT, KIND_PLACE, KIND_REMOVE,
 )
 
 
 class FakeClock:
-    """Управляемые часы: и wall-clock, и monotonic двигаются вместе."""
     def __init__(self):
         self.t = 1000.0
 
@@ -23,209 +22,147 @@ class FakeClock:
 IP = "1.2.3.4:7777"
 
 
-def make_coord(**cfg):
+def make(**cfg):
     clk = FakeClock()
-    coord = FireCoordinator(FireConfig(**cfg), clock=clk, monotonic=clk)
-    return coord, clk
+    return FireCoordinator(FireConfig(**cfg), clock=clk, monotonic=clk), clk
 
 
-def test_ignite_creates_incident_and_proposed_cell():
-    coord, _ = make_coord()
-    res = coord.ignite("u1", 10.0, 20.0, 3.0, 0, 0, 1, IP)
-    assert res["ok"] is True
-    assert res["incidentId"] in coord.incidents
-    assert len(coord.cells) == 1
-    cell = next(iter(coord.cells.values()))
-    assert cell.state == STATE_PROPOSED
-    assert cell.assigned_to == "u1"
+def connect(coord, uid, x=0, y=0, z=0, ip=IP):
+    coord.worker_connect(uid, uid, ip, {"x": x, "y": y, "z": z})
 
 
-def test_placed_report_turns_cell_burning():
-    coord, _ = make_coord()
-    res = coord.ignite("u1", 10.0, 20.0, 3.0, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    out = coord.sync("u1", "Nick", {"x": 10, "y": 20, "z": 3}, IP,
-                     placed=[{"gridKey": gk, "serverId": 555}])
-    assert out["ok"]
+def test_ignite_creates_place_job_and_dispatches():
+    coord, _ = make()
+    connect(coord, "u1", 0, 0, 0)
+    res = coord.ignite("u1", 1, 1, 0, 0, 0, 1, IP)
+    assert res["ok"]
+    # одна ячейка proposed + одно place-задание pending
+    assert len(coord.cells) == 1 and len(coord.jobs) == 1
+    out = coord.dispatch()
+    assert len(out) == 1
+    uid, payload = out[0]
+    assert uid == "u1" and payload["kind"] == KIND_PLACE
+
+
+def test_place_done_marks_burning():
+    coord, _ = make()
+    connect(coord, "u1", 0, 0, 0)
+    coord.ignite("u1", 1, 1, 0, 0, 0, 1, IP)
+    out = coord.dispatch()
+    job = out[0][1]
+    coord.job_done("u1", job["id"], True, 555)
     cell = next(iter(coord.cells.values()))
     assert cell.state == STATE_BURNING
-    assert cell.server_object_id == 555
-    assert cell.placed_by == "u1"
+    assert cell.server_object_id == 555 and cell.placed_by == "u1"
+    assert len(coord.jobs) == 0
 
 
-def test_claim_dedup_first_wins():
-    coord, _ = make_coord()
-    pos = {"x": 50, "y": 50, "z": 2}
-    claim = {"gridKey": "25:25:1", "x": 50, "y": 50, "z": 2, "nz": 1}
-    r1 = coord.sync("u1", "A", pos, IP, claims=[claim])
-    r2 = coord.sync("u2", "B", pos, IP, claims=[claim])
-    assert "25:25:1" in r1["grants"]
-    assert "25:25:1" in r2["denied"]
-    assert "25:25:1" not in r2["grants"]
+def test_propose_balances_across_workers():
+    coord, _ = make(max_inflight=2, place_range=50)
+    connect(coord, "A", 0, 0, 0)
+    connect(coord, "B", 0, 0, 0)
+    cands = [{"x": 4, "y": 0, "z": 0}, {"x": 6, "y": 0, "z": 0},
+             {"x": 8, "y": 0, "z": 0}, {"x": 10, "y": 0, "z": 0}]
+    assert coord.propose("A", IP, cands) == 4
+    coord.dispatch()
+    # 4 задания, max_inflight=2 → ровно по 2 на воркера (балансировка)
+    assert len(coord.workers["A"].inflight) == 2
+    assert len(coord.workers["B"].inflight) == 2
 
 
-def test_failed_placement_frees_cell_into_cooldown():
-    coord, clk = make_coord(cooldown_s=30)
-    res = coord.ignite("u1", 10, 20, 3, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    coord.sync("u1", "A", {"x": 10, "y": 20, "z": 3}, IP, failed=[{"gridKey": gk}])
+def test_dispatch_respects_place_range():
+    coord, _ = make(place_range=28)
+    connect(coord, "far", 1000, 1000, 0)   # далеко от очага
+    coord.ignite("far", 1, 1, 0, 0, 0, 1, IP)
+    out = coord.dispatch()
+    assert out == []                       # некому ставить (вне радиуса)
+    assert len(coord.jobs) == 1            # задание ждёт
+
+
+def test_water_remove_routed_to_placer_own():
+    coord, _ = make(place_range=50)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    job = coord.dispatch()[0][1]
+    coord.job_done("A", job["id"], True, 7)
     cell = next(iter(coord.cells.values()))
-    assert cell.state == STATE_OUT
-    # В cooldown повторный claim того же ключа отклоняется.
-    r = coord.sync("u1", "A", {"x": 10, "y": 20, "z": 3}, IP,
-                   claims=[{"gridKey": gk, "x": 10, "y": 20, "z": 3, "nz": 1}])
-    assert gk in r["denied"]
-
-
-def test_water_drives_to_extinguishing():
-    coord, _ = make_coord(water_factor=1.0)
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": gk, "serverId": 7}])
-    cell = next(iter(coord.cells.values()))
-    cell.heat = 50.0
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
-               water=[{"cellId": cell.id, "amount": 60}])
+    cell.heat = 50
+    coord.apply_water(IP, [{"cellId": cell.id, "amount": 60}])
     assert cell.state == STATE_EXTINGUISHING
-    assert cell.heat == 0.0
+    out = coord.dispatch()
+    assert len(out) == 1
+    uid, payload = out[0]
+    assert uid == "A" and payload["kind"] == KIND_REMOVE
+    assert payload["serverId"] == 7 and payload["mode"] == "own"
 
 
-def test_remove_routed_to_original_placer():
-    coord, _ = make_coord()
-    res = coord.ignite("placer", 0, 0, 0, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    coord.sync("placer", "P", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": gk, "serverId": 99}])
+def test_remove_foreign_when_placer_offline():
+    coord, clk = make(place_range=50, worker_stale_s=15)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    job = coord.dispatch()[0][1]
+    coord.job_done("A", job["id"], True, 9)
     cell = next(iter(coord.cells.values()))
-    cell.state = STATE_EXTINGUISHING
-    cell.heat = 0.0
-    # Другой клиент рядом, но remove должен уйти placer'у (id-delete только у него).
-    coord.sync("bystander", "B", {"x": 1, "y": 1, "z": 0}, IP)
-    out = coord.sync("placer", "P", {"x": 0, "y": 0, "z": 0}, IP)
-    ids = [r["serverId"] for r in out["removes"]]
-    assert 99 in ids
-    assert out["removes"][0]["mode"] == "own"
+    cell.heat = 10
+    coord.apply_water(IP, [{"cellId": cell.id, "amount": 20}])
+    # placer A уходит офлайн, появляется B рядом
+    coord.worker_disconnect("A")
+    connect(coord, "B", 2, 2, 0)
+    out = coord.dispatch()
+    assert len(out) == 1
+    uid, payload = out[0]
+    assert uid == "B" and payload["mode"] == "foreign" and payload["serverId"] == 9
 
 
-def test_remove_fallback_to_nearest_when_placer_offline():
-    coord, clk = make_coord(client_stale_s=15)
-    res = coord.ignite("placer", 0, 0, 0, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    coord.sync("placer", "P", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": gk, "serverId": 42}])
-    cell = next(iter(coord.cells.values()))
-    cell.state = STATE_EXTINGUISHING
-    cell.heat = 0.0
-    # placer уходит офлайн (время > client_stale_s без sync), приходит сосед.
-    clk.advance(20)
-    out = coord.sync("near", "N", {"x": 1, "y": 1, "z": 0}, IP)
-    ids = [r["serverId"] for r in out["removes"]]
-    assert 42 in ids
-    assert out["removes"][0]["mode"] == "foreign"
+def test_worker_disconnect_requeues_jobs():
+    coord, _ = make(place_range=50)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    coord.dispatch()
+    assert len(coord.workers["A"].inflight) == 1
+    coord.worker_disconnect("A")
+    # задание снова pending
+    job = next(iter(coord.jobs.values()))
+    assert job.assigned_to is None
 
 
-def test_removed_confirmation_marks_out():
-    coord, _ = make_coord()
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    gk = res["gridKey"]
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": gk, "serverId": 9}])
-    cell = next(iter(coord.cells.values()))
-    cell.state = STATE_EXTINGUISHING
-    cell.heat = 0.0
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP, removed=[cell.id])
-    assert cell.state == STATE_OUT
-    assert cell.server_object_id is None
-
-
-def test_tick_ramps_heat_and_expires_claims():
-    coord, clk = make_coord(heat_ramp_per_s=20, heat_max=100, claim_ttl_s=8)
-    # burning ячейка — heat растёт.
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": res["gridKey"], "serverId": 1}])
-    cell = next(iter(coord.cells.values()))
+def test_job_timeout_requeues_in_tick():
+    coord, clk = make(place_range=50, job_timeout_s=10, worker_stale_s=100)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    coord.dispatch()
+    job = next(iter(coord.jobs.values()))
+    assert job.assigned_to == "A"
+    clk.advance(11)
     coord.tick()
-    assert cell.heat == 20.0
-    # proposed ячейка с протухшим claim — снимается тиком.
-    coord.sync("u2", "B", {"x": 100, "y": 100, "z": 0}, IP,
-               claims=[{"gridKey": "50:50:0", "x": 100, "y": 100, "z": 0, "nz": 1}])
-    assert (IP, "50:50:0") in coord.cells
-    clk.advance(10)  # > claim_ttl_s
-    coord.tick()
-    assert (IP, "50:50:0") not in coord.cells
+    assert job.assigned_to is None
+    assert len(coord.workers["A"].inflight) == 0
 
 
-def test_out_cell_cleared_after_cooldown():
-    coord, clk = make_coord(cooldown_s=30)
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP, failed=[{"gridKey": res["gridKey"]}])
-    assert len(coord.cells) == 1
-    clk.advance(31)
-    coord.tick()
-    assert len(coord.cells) == 0
-    assert len(coord.incidents) == 0  # GC инцидента без живых ячеек
-
-
-def test_ignite_merges_into_nearby_incident():
-    coord, _ = make_coord(merge_dist=8.0)
-    r1 = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    r2 = coord.ignite("u2", 3, 0, 0, 0, 0, 1, IP)  # в пределах merge_dist
-    assert r1["incidentId"] == r2["incidentId"]
-    assert len(coord.incidents) == 1
-    # далеко — новый incident
-    r3 = coord.ignite("u3", 100, 100, 0, 0, 0, 1, IP)
-    assert r3["incidentId"] != r1["incidentId"]
-    assert len(coord.incidents) == 2
-
-
-def test_cells_near_radius_filtering():
-    coord, _ = make_coord(near_radius=50)
-    coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    coord.ignite("u1", 200, 0, 0, 0, 0, 1, IP)  # далеко
-    out = coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP)
-    assert len(out["cells_near"]) == 1
-
-
-def test_sync_caps_expose_grid_for_clients():
-    # Клиенты квантуют кандидаты спреда той же сеткой — caps должны её отдавать.
-    coord, _ = make_coord(grid=2.0, grid_z=2.0, spread_min_heat=40, max_cells=60)
-    out = coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP)
-    caps = out["caps"]
-    assert caps["grid"] == 2.0
-    assert caps["gridZ"] == 2.0
-    assert caps["spreadMinHeat"] == 40
-    assert caps["maxCells"] == 60
-
-
-def test_wipe_drops_all_cells():
-    # /firewipe: жёсткий сброс — ячейки полностью уходят из реестра (не extinguishing-хвосты).
-    coord, _ = make_coord()
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP,
-               placed=[{"gridKey": res["gridKey"], "serverId": 5}])
-    assert len(coord.cells) == 1
+def test_wipe_clears_cells_and_jobs():
+    coord, _ = make(place_range=50)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    coord.dispatch()
+    assert len(coord.cells) == 1 and len(coord.jobs) == 1
     n = coord.wipe(IP)
     assert n == 1
-    assert len(coord.cells) == 0
-    assert len(coord.incidents) == 0
-    # cells_near после wipe пуст → синих квадратов в оверлее не остаётся
-    out = coord.sync("u1", "A", {"x": 0, "y": 0, "z": 0}, IP)
-    assert out["cells_near"] == []
+    assert len(coord.cells) == 0 and len(coord.jobs) == 0
+    assert len(coord.workers["A"].inflight) == 0
 
 
-def test_max_cells_cap_denies_claim():
-    coord, _ = make_coord(max_cells=2)
-    res = coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
-    inc = res["incidentId"]
-    # две заявки в тот же incident — обе ок (ignite-ячейка proposed уже считается)
-    pos = {"x": 0, "y": 0, "z": 0}
-    coord.sync("u1", "A", pos, IP, claims=[
-        {"gridKey": "10:0:0", "x": 20, "y": 0, "z": 0, "nz": 1, "incidentId": inc},
-    ])
-    # incident уже содержит 2 ячейки (ignite + 1 claim) → следующая отклонена
-    r = coord.sync("u1", "A", pos, IP, claims=[
-        {"gridKey": "20:0:0", "x": 40, "y": 0, "z": 0, "nz": 1, "incidentId": inc},
-    ])
-    assert "20:0:0" in r["denied"]
+def test_propose_cap_per_incident():
+    coord, _ = make(max_cells=2, place_range=50)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 0, 0, 0, 0, 0, 1, IP)
+    inc = next(iter(coord.incidents))
+    # ещё 1 кандидат в тот же incident — ок (итого 2), следующий отклонён
+    assert coord.propose("A", IP, [{"x": 4, "y": 0, "z": 0, "incidentId": inc}]) == 1
+    assert coord.propose("A", IP, [{"x": 8, "y": 0, "z": 0, "incidentId": inc}]) == 0
+
+
+def test_caps_expose_grid_and_range():
+    coord, _ = make(grid=2.0, spread_min_heat=40, place_range=28)
+    caps = coord.caps()
+    assert caps["grid"] == 2.0 and caps["spreadMinHeat"] == 40
+    assert caps["placeRange"] == 28 and caps["heatRamp"] == 20.0

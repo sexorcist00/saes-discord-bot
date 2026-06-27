@@ -1,4 +1,6 @@
-"""Интеграционные тесты fire-роутов aiohttp (авторизация + сквозной ignite→sync)."""
+"""Интеграционные тесты fire WebSocket-канала (hello/job/done) + авторизация."""
+
+import json
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -17,11 +19,11 @@ class FakeDB:
 class FakeBot:
     def __init__(self):
         self.db = FakeDB()
-        self.fire = FireCoordinator(FireConfig())
+        self.fire = FireCoordinator(FireConfig(place_range=50))
+        self.fire_ws = {}
 
 
 IP = "1.2.3.4:7777"
-AUTH = {"Authorization": "Bearer good"}
 
 
 @pytest.fixture
@@ -33,42 +35,42 @@ async def client():
         yield c
 
 
-async def test_sync_requires_token(client):
-    r = await client.post("/api/objmapper/fire/sync", json={"server_ip": IP, "pos": {}})
-    assert r.status == 401
+async def _recv_until(ws, t, limit=10):
+    """Получать сообщения, пока не придёт тип t (пропуская welcome/state)."""
+    for _ in range(limit):
+        msg = await ws.receive_json()
+        if msg.get("t") == t:
+            return msg
+    raise AssertionError(f"не дождались сообщения t={t}")
 
 
-async def test_ignite_then_sync_place(client):
-    # Поджог
-    r = await client.post("/api/objmapper/fire/ignite", headers=AUTH, json={
-        "x": 10, "y": 20, "z": 3, "nx": 0, "ny": 0, "nz": 1, "server_ip": IP,
-    })
-    assert r.status == 200
-    body = await r.json()
-    assert body["ok"] is True
-    gk = body["gridKey"]
-
-    # Постановка объекта → ячейка burning, видна в cells_near
-    r = await client.post("/api/objmapper/fire/sync", headers=AUTH, json={
-        "server_ip": IP, "pos": {"x": 10, "y": 20, "z": 3},
-        "placed": [{"gridKey": gk, "serverId": 777}],
-    })
-    assert r.status == 200
-    body = await r.json()
-    assert body["ok"] is True
-    near = body["cells_near"]
-    assert len(near) == 1 and near[0]["state"] == "burning"
-    # координатор подхватил serverId
-    cell = next(iter(client.bot.fire.cells.values()))
-    assert cell.server_object_id == 777
+async def test_ws_rejects_bad_token(client):
+    async with client.ws_connect("/api/objmapper/fire/ws") as ws:
+        await ws.send_str(json.dumps({"t": "hello", "token": "bad", "server_ip": IP, "pos": {}}))
+        msg = await ws.receive_json()
+        assert msg["t"] == "error" and msg["reason"] == "UNAUTHORIZED"
 
 
-async def test_ignite_bad_coords(client):
-    r = await client.post("/api/objmapper/fire/ignite", headers=AUTH,
-                          json={"server_ip": IP})
-    assert r.status == 400
+async def test_ws_hello_welcome_and_worker_registered(client):
+    async with client.ws_connect("/api/objmapper/fire/ws") as ws:
+        await ws.send_str(json.dumps({"t": "hello", "token": "good",
+                                      "server_ip": IP, "pos": {"x": 0, "y": 0, "z": 0}}))
+        welcome = await _recv_until(ws, "welcome")
+        assert "caps" in welcome and welcome["caps"]["grid"] == 2.0
+        assert "u1" in client.bot.fire.workers
 
 
-async def test_sync_requires_server_ip(client):
-    r = await client.post("/api/objmapper/fire/sync", headers=AUTH, json={"pos": {}})
-    assert r.status == 400
+async def test_ws_ignite_dispatches_place_job(client):
+    async with client.ws_connect("/api/objmapper/fire/ws") as ws:
+        await ws.send_str(json.dumps({"t": "hello", "token": "good",
+                                      "server_ip": IP, "pos": {"x": 0, "y": 0, "z": 0}}))
+        await _recv_until(ws, "welcome")
+        # Поджог → бэкенд создаёт place-задание и пушит его нам (единственный воркер).
+        await ws.send_str(json.dumps({"t": "ignite", "server_ip": IP,
+                                      "x": 1, "y": 1, "z": 0, "nx": 0, "ny": 0, "nz": 1}))
+        job = await _recv_until(ws, "job")
+        assert job["job"]["kind"] == "place"
+        assert "id" in job["job"] and "gridKey" in job["job"]
+        # задание назначено нам (в inflight)
+        assert job["job"]["id"] in client.bot.fire.workers["u1"].inflight
+        # done→burning покрыт юнит-тестом координатора (test_place_done_marks_burning)
