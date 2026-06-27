@@ -329,6 +329,8 @@ class FireCoordinator:
                 "grid": self.cfg.grid,
                 "gridZ": self.cfg.grid_z,
                 "spreadMinHeat": self.cfg.spread_min_heat,
+                "heatMax": self.cfg.heat_max,
+                "heatRamp": self.cfg.heat_ramp_per_s,
             },
         }
 
