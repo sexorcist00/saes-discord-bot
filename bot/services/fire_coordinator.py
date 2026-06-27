@@ -28,6 +28,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from bot.utils.logger import get_logger
+
+logger = get_logger("services.fire")
+
 
 # ── Состояния ячейки ────────────────────────────────────────────────────────
 #  proposed     — заявлена клиентом, выдан claim, клиент сейчас ставит объект
@@ -209,6 +213,8 @@ class FireCoordinator:
             claim_deadline=now_m + self.cfg.claim_ttl_s, created_ts=now,
         )
         self.cells[key] = cell
+        logger.info("ignite user=%s incident=%s gk=%s @ %.1f,%.1f,%.1f (cells incident=%d)",
+                    user_id, inc.id, gk, x, y, z, self._incident_cell_count(inc.id))
         return {"ok": True, "incidentId": inc.id, "gridKey": gk}
 
     # ── Основной канал клиента ───────────────────────────────────────────────
@@ -241,6 +247,8 @@ class FireCoordinator:
             cell.state = STATE_BURNING
             cell.ignited_ts = now
             cell.assigned_to = None
+            logger.info("burning gk=%s serverId=%s by=%s incident=%s",
+                        cell.grid_key, cell.server_object_id, user_id, cell.incident_id)
 
         # 2) Неудачные постановки (нет поверхности/обрыв): снять ячейку в cooldown.
         for f in failed:
@@ -248,6 +256,7 @@ class FireCoordinator:
             if cell and cell.state == STATE_PROPOSED and cell.assigned_to == user_id:
                 cell.state = STATE_OUT
                 cell.out_ts = now
+                logger.info("place-failed gk=%s by=%s (нет поверхности/далеко)", cell.grid_key, user_id)
 
         # 3) Вода: снижаем heat; heat<=0 → extinguishing.
         for w in water:
@@ -257,6 +266,7 @@ class FireCoordinator:
                 if cell.heat <= 0.0:
                     cell.heat = 0.0
                     cell.state = STATE_EXTINGUISHING
+                    logger.info("extinguishing cell=%s gk=%s (heat<=0)", cell.id, cell.grid_key)
 
         # 4) Подтверждённые удаления.
         for cid in removed:
@@ -266,6 +276,7 @@ class FireCoordinator:
                 cell.out_ts = now
                 cell.server_object_id = None
                 cell.remove_assigned_to = None
+                logger.info("out cell=%s gk=%s (removed by=%s)", cell.id, cell.grid_key, user_id)
 
         # 5) Claim-заявки от клиента (дедуп: первый побеждает).
         grants: List[str] = []
@@ -339,6 +350,9 @@ class FireCoordinator:
             if target:
                 cell.remove_assigned_to = target.user_id
                 cell.remove_deadline = now_m + self.cfg.remove_retry_s
+                mode = "own" if cell.placed_by == target.user_id else "foreign"
+                logger.info("remove-dispatch cell=%s serverId=%s → user=%s mode=%s (placer=%s)",
+                            cell.id, cell.server_object_id, target.user_id, mode, cell.placed_by)
 
     def _removes_for(self, user_id: str, server_ip: str) -> List[dict]:
         out = []

@@ -390,9 +390,13 @@ async def handle_fire_admin(request: web.Request) -> web.Response:
     action = str(data.get("action") or "").strip()
     server_ip = str(data.get("server_ip") or "").strip() or None
     if action == "status":
-        return web.json_response({"ok": True, "snapshot": fire.snapshot(server_ip)})
+        snap = fire.snapshot(server_ip)
+        logger.info("fire admin status by user=%s: %s", link["discord_user_id"], snap)
+        return web.json_response({"ok": True, "snapshot": snap})
     if action == "reset":
         n = fire.reset(server_ip)
+        logger.info("fire admin reset by user=%s: снято %d ячеек (server_ip=%s)",
+                    link["discord_user_id"], n, server_ip)
         return web.json_response({"ok": True, "reset": n})
     return web.json_response({"error": "BAD_ACTION"}, status=400)
 
