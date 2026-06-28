@@ -339,10 +339,38 @@ class Config:
         """Параметры координатора пожара (только заданные ключи; остальное — дефолты
         FireConfig). Возвращаем сырой dict, main.py соберёт FireConfig(**params)."""
         sec = self._fire_section()
-        allowed = ('grid', 'grid_z', 'max_cells', 'cooldown_s', 'claim_ttl_s',
-                   'merge_dist', 'heat_max', 'heat_ramp_per_s', 'water_factor',
-                   'client_stale_s', 'remove_retry_s', 'near_radius', 'spread_min_heat')
-        return {k: sec[k] for k in allowed if k in sec and sec[k] is not None}
+        allowed = ('grid', 'grid_z', 'max_cells', 'cooldown_s', 'merge_dist',
+                   'heat_max', 'heat_ramp_per_s', 'water_factor', 'spread_min_heat',
+                   'place_range', 'max_inflight', 'job_timeout_s', 'worker_stale_s',
+                   'spread_interval', 'spread_chance', 'spread_max_per_tick', 'burn_seconds',
+                   'wind_x', 'wind_y', 'wind_strength', 'slope_bias', 'fuel_bias',
+                   'ext_water_per_sec', 'ext_range', 'ext_radius')
+        params = {k: sec[k] for k in allowed if k in sec and sec[k] is not None}
+        fs = sec.get('fuel_surfaces')
+        if isinstance(fs, list):
+            params['fuel_surfaces'] = [int(x) for x in fs if x is not None]
+        return params
+
+    def _fire_role_ids(self, key: str) -> List[int]:
+        raw = self._fire_section().get(key, []) or []
+        out = []
+        for rid in raw:
+            if rid is None or str(rid).strip() == '':
+                continue
+            try:
+                out.append(int(rid))
+            except (TypeError, ValueError):
+                logger.warning(f"Некорректный fire role id ({key}): {rid!r}")
+        return out
+
+    def get_fire_admin_role_ids(self) -> List[int]:
+        """Роли админа пожара (настройки + действия). Пусто → админов нет."""
+        return self._fire_role_ids('admin_role_ids')
+
+    def get_fire_allowed_role_ids(self) -> List[int]:
+        """Роли пожарного (поджог/тушение). Пусто → fallback на objmapper.allowed_role_ids."""
+        ids = self._fire_role_ids('allowed_role_ids')
+        return ids if ids else self.get_objmapper_allowed_role_ids()
 
     # ============ Геттеры для форума (источник истины) ============
 

@@ -55,6 +55,24 @@ class FireConfig:
     max_inflight: int = 2          # сколько заданий разом на воркера (заставляет распределять)
     job_timeout_s: float = 10.0    # задание не подтверждено → переназначить
     worker_stale_s: float = 12.0   # воркер без вестей дольше — офлайн (реквью его заданий)
+    # ── Настраиваемые админом (live через меню; уходят клиентам в caps) ──
+    spread_interval: float = 2.5   # сек между расчётами спреда на клиенте
+    spread_chance: float = 0.55    # вероятность кандидата в сторону
+    spread_max_per_tick: int = 6   # лимит новых кандидатов за расчёт
+    burn_seconds: float = 0.0      # автозатухание очага (0 = горит до тушения)
+    wind_x: float = 0.0            # вектор ветра (нормируется на клиенте)
+    wind_y: float = 0.0
+    wind_strength: float = 0.0     # 0..1 — сила направленного биаса
+    slope_bias: float = 0.5        # вклад «вверх по склону быстрее» (0 = выкл)
+    fuel_bias: float = 0.5         # вклад тяги к горючим поверхностям (0 = выкл)
+    ext_water_per_sec: float = 60.0  # скорость воды огнетушителя
+    ext_range: float = 12.0          # дальность струи (м)
+    ext_radius: float = 3.0          # радиус захвата у точки удара (м)
+    paused: bool = False             # админ-«стоп»: клиенты не предлагают новых очагов
+    # Горючие типы ПОВЕРХНОСТЕЙ SA (surfaceType из колпоинта raycast): дерево/трава/листва.
+    # Клиент по ним повышает вес кандидата (материал надёжнее перечня моделей). Дефолт ПУСТ —
+    # populate'ится после калибровки: /firedebug покажет surfaceType кандидатов в игре.
+    fuel_surfaces: list = field(default_factory=list)
 
 
 @dataclass
@@ -74,6 +92,7 @@ class Cell:
     server_object_id: Optional[int] = None
     placed_by: Optional[str] = None
     created_ts: float = 0.0
+    burning_ts: float = 0.0
     out_ts: float = 0.0
 
     def to_near(self) -> dict:
@@ -126,6 +145,8 @@ class Worker:
     z: float
     last_seen: float = 0.0
     inflight: Set[str] = field(default_factory=set)
+    can_ignite: bool = False    # роль пожарного (поджог/тушение)
+    is_admin: bool = False      # роль админа пожара (настройки/действия)
 
 
 @dataclass
@@ -162,13 +183,15 @@ class FireCoordinator:
                              math.floor(z / self.cfg.grid_z))
 
     # ── Воркеры ──────────────────────────────────────────────────────────────
-    def worker_connect(self, user_id: str, nick: str, server_ip: str, pos: dict) -> None:
+    def worker_connect(self, user_id: str, nick: str, server_ip: str, pos: dict,
+                       can_ignite: bool = False, is_admin: bool = False) -> None:
         self.workers[user_id] = Worker(
             user_id=user_id, nick=nick or "", server_ip=server_ip,
             x=float(pos.get("x", 0)), y=float(pos.get("y", 0)), z=float(pos.get("z", 0)),
-            last_seen=self._mono(),
+            last_seen=self._mono(), can_ignite=can_ignite, is_admin=is_admin,
         )
-        logger.info("worker connect user=%s server=%s", user_id, server_ip)
+        logger.info("worker connect user=%s server=%s ignite=%s admin=%s",
+                    user_id, server_ip, can_ignite, is_admin)
 
     def worker_pos(self, user_id: str, server_ip: str, pos: dict, nick: str = "") -> None:
         w = self.workers.get(user_id)
@@ -284,6 +307,7 @@ class FireCoordinator:
                     cell.state = STATE_BURNING
                     cell.server_object_id = int(server_id)
                     cell.placed_by = user_id
+                    cell.burning_ts = now
                     logger.info("burning gk=%s serverId=%s by=%s", cell.grid_key, server_id, user_id)
                 else:
                     cell.state = STATE_OUT
@@ -335,6 +359,13 @@ class FireCoordinator:
             if c.state == STATE_BURNING:
                 if c.heat < self.cfg.heat_max:
                     c.heat = min(self.cfg.heat_max, c.heat + self.cfg.heat_ramp_per_s)
+                # Автозатухание очага (если включено админом): после burn_seconds горения.
+                if self.cfg.burn_seconds > 0 and c.burning_ts > 0 \
+                        and (now - c.burning_ts) >= self.cfg.burn_seconds:
+                    c.state = STATE_EXTINGUISHING
+                    c.heat = 0.0
+                    self._ensure_remove_job(c)
+                    logger.info("auto-burnout gk=%s (горел %.0fс)", c.grid_key, now - c.burning_ts)
             elif c.state == STATE_EXTINGUISHING:
                 self._ensure_remove_job(c)
             elif c.state == STATE_OUT and (now - c.out_ts) > self.cfg.cooldown_s:
@@ -419,11 +450,55 @@ class FireCoordinator:
         return {"cells_near": near, "caps": self.caps()}
 
     def caps(self) -> dict:
+        c = self.cfg
         return {
-            "maxCells": self.cfg.max_cells, "grid": self.cfg.grid, "gridZ": self.cfg.grid_z,
-            "spreadMinHeat": self.cfg.spread_min_heat, "heatMax": self.cfg.heat_max,
-            "heatRamp": self.cfg.heat_ramp_per_s, "placeRange": self.cfg.place_range,
+            "maxCells": c.max_cells, "grid": c.grid, "gridZ": c.grid_z,
+            "spreadMinHeat": c.spread_min_heat, "heatMax": c.heat_max,
+            "heatRamp": c.heat_ramp_per_s, "placeRange": c.place_range,
+            # настраиваемые (клиент читает для спреда/тушения):
+            "spreadInterval": c.spread_interval, "spreadChance": c.spread_chance,
+            "spreadMaxPerTick": c.spread_max_per_tick,
+            "windX": c.wind_x, "windY": c.wind_y, "windStrength": c.wind_strength,
+            "slopeBias": c.slope_bias, "fuelBias": c.fuel_bias, "fuelSurfaces": c.fuel_surfaces,
+            "extWaterPerSec": c.ext_water_per_sec, "extRange": c.ext_range, "extRadius": c.ext_radius,
+            "paused": c.paused,
         }
+
+    # ── Live-конфиг от админа (меню) ─────────────────────────────────────────
+    # Белый список изменяемых полей FireConfig. Меню шлёт {key: value}; применяем и
+    # рассылаем новые caps всем клиентам. Числа клампим в разумные пределы.
+    _CONFIG_BOUNDS = {
+        "spread_interval": (0.3, 30.0), "spread_chance": (0.0, 1.0),
+        "spread_max_per_tick": (1, 64), "heat_ramp_per_s": (1.0, 200.0),
+        "spread_min_heat": (0.0, 100.0), "burn_seconds": (0.0, 3600.0),
+        "wind_x": (-1.0, 1.0), "wind_y": (-1.0, 1.0), "wind_strength": (0.0, 1.0),
+        "slope_bias": (0.0, 4.0), "fuel_bias": (0.0, 4.0),
+        "ext_water_per_sec": (1.0, 1000.0), "ext_range": (1.0, 60.0), "ext_radius": (0.5, 30.0),
+        "max_cells": (1, 1000), "max_inflight": (1, 32), "cooldown_s": (0.0, 600.0),
+    }
+
+    def set_config(self, params: dict) -> dict:
+        """Применить настройки от админа. Возвращает обновлённый caps."""
+        applied = {}
+        for k, v in (params or {}).items():
+            if k == "fuel_surfaces" and isinstance(v, list):
+                self.cfg.fuel_surfaces = [int(s) for s in v if isinstance(s, (int, float))]
+                applied[k] = self.cfg.fuel_surfaces
+                continue
+            b = self._CONFIG_BOUNDS.get(k)
+            if not b:
+                continue
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            val = max(b[0], min(b[1], val))
+            if k in ("spread_max_per_tick", "max_cells", "max_inflight"):
+                val = int(val)
+            setattr(self.cfg, k, val)
+            applied[k] = val
+        logger.info("fire config set: %s", applied)
+        return self.caps()
 
     # ── Админ ────────────────────────────────────────────────────────────────
     def snapshot(self, server_ip: Optional[str] = None) -> dict:

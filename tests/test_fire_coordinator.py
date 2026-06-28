@@ -161,6 +161,31 @@ def test_propose_cap_per_incident():
     assert coord.propose("A", IP, [{"x": 8, "y": 0, "z": 0, "incidentId": inc}]) == 0
 
 
+def test_set_config_clamps_and_returns_caps():
+    coord, _ = make()
+    caps = coord.set_config({"spread_chance": 5.0, "ext_range": 999, "burn_seconds": 30,
+                             "max_inflight": 4, "unknown_key": 1})
+    assert coord.cfg.spread_chance == 1.0      # кламп к [0,1]
+    assert coord.cfg.ext_range == 60.0         # кламп к max
+    assert coord.cfg.burn_seconds == 30.0
+    assert coord.cfg.max_inflight == 4
+    assert caps["spreadChance"] == 1.0 and caps["extRange"] == 60.0
+
+
+def test_auto_burnout_after_burn_seconds():
+    coord, clk = make(place_range=50, burn_seconds=5, worker_stale_s=100)
+    connect(coord, "A", 0, 0, 0)
+    coord.ignite("A", 1, 1, 0, 0, 0, 1, IP)
+    job = coord.dispatch()[0][1]
+    coord.job_done("A", job["id"], True, 3)
+    cell = next(iter(coord.cells.values()))
+    assert cell.state == STATE_BURNING
+    clk.advance(6)            # > burn_seconds
+    coord.tick()
+    assert cell.state == STATE_EXTINGUISHING
+    assert any(j.kind == KIND_REMOVE for j in coord.jobs.values())
+
+
 def test_caps_expose_grid_and_range():
     coord, _ = make(grid=2.0, spread_min_heat=40, place_range=28)
     caps = coord.caps()

@@ -70,6 +70,22 @@ async def check_member_roles(
     return True, member, roles_payload, "OK"
 
 
+async def check_fire_roles(bot, discord_user_id) -> Tuple[bool, bool]:
+    """Роли пожара: (can_ignite, is_admin). admin → подразумевает ignite."""
+    config = bot.config
+    guild = bot.get_guild(config.get_main_server_id())
+    if guild is None:
+        return False, False
+    try:
+        member = await guild.fetch_member(int(discord_user_id))
+    except Exception:  # noqa: BLE001
+        return False, False
+    role_ids = {r.id for r in member.roles}
+    is_admin = bool(role_ids & set(config.get_fire_admin_role_ids()))
+    can_ignite = is_admin or bool(role_ids & set(config.get_fire_allowed_role_ids()))
+    return can_ignite, is_admin
+
+
 @web.middleware
 async def _error_middleware(request, handler):
     """Любое необработанное исключение → JSON 500 (а не HTML-страница aiohttp)."""
@@ -385,29 +401,60 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
                     break
                 user_id = str(link["discord_user_id"])
                 server_ip = str(data.get("server_ip") or "")
-                fire.worker_connect(user_id, link.get("samp_nick", ""), server_ip, data.get("pos") or {})
+                can_ignite, is_admin = await check_fire_roles(bot, user_id)
+                fire.worker_connect(user_id, link.get("samp_nick", ""), server_ip,
+                                    data.get("pos") or {}, can_ignite=can_ignite, is_admin=is_admin)
                 bot.fire_ws[user_id] = ws
-                await _ws_send(ws, {"t": "welcome", "caps": fire.caps()})
+                await _ws_send(ws, {"t": "welcome", "caps": fire.caps(),
+                                    "canIgnite": can_ignite, "isAdmin": is_admin})
                 await fire_push_dispatch(bot)
                 await _ws_send(ws, {"t": "state", **fire.state_for(user_id)})
                 continue
 
             sip = str(data.get("server_ip") or "")
+            worker = fire.workers.get(user_id)
             if t == "pos":
                 fire.worker_pos(user_id, sip, data.get("pos") or {})
             elif t == "ignite":
-                try:
-                    fire.ignite(user_id, float(data["x"]), float(data["y"]), float(data["z"]),
-                                float(data.get("nx", 0)), float(data.get("ny", 0)),
-                                float(data.get("nz", 1)), sip)
-                except (KeyError, TypeError, ValueError):
-                    pass
+                if not (worker and worker.can_ignite):
+                    await _ws_send(ws, {"t": "error", "reason": "NO_IGNITE_ROLE"})
+                else:
+                    try:
+                        fire.ignite(user_id, float(data["x"]), float(data["y"]), float(data["z"]),
+                                    float(data.get("nx", 0)), float(data.get("ny", 0)),
+                                    float(data.get("nz", 1)), sip)
+                    except (KeyError, TypeError, ValueError):
+                        pass
             elif t == "propose":
-                fire.propose(user_id, sip, data.get("cells") or [])
+                if worker and worker.can_ignite:   # спред — продолжение поджога, та же роль
+                    fire.propose(user_id, sip, data.get("cells") or [])
             elif t == "done":
                 fire.job_done(user_id, str(data.get("id")), bool(data.get("ok")), data.get("serverId"))
             elif t == "water":
                 fire.apply_water(sip, data.get("cells") or [])
+            elif t == "config":
+                # Живая настройка от админа → применить и разослать новые caps всем.
+                if worker and worker.is_admin:
+                    fire.set_config(data.get("config") or {})
+                    logger.info("fire config by admin=%s", user_id)
+                    await fire_push_states(bot)
+                else:
+                    await _ws_send(ws, {"t": "error", "reason": "NO_ADMIN_ROLE"})
+            elif t == "cmd":
+                if worker and worker.is_admin:
+                    action = str(data.get("action") or "")
+                    if action == "wipe":
+                        n = fire.wipe(sip or None)
+                        await _ws_send(ws, {"t": "cmdResult", "action": "wipe", "wiped": n})
+                    elif action in ("stop", "resume"):
+                        fire.set_config({})
+                        fire.cfg.paused = (action == "stop")
+                        await fire_push_states(bot)
+                    elif action == "status":
+                        await _ws_send(ws, {"t": "cmdResult", "action": "status",
+                                            "snapshot": fire.snapshot(sip or None)})
+                else:
+                    await _ws_send(ws, {"t": "error", "reason": "NO_ADMIN_ROLE"})
             # после любой мутации — раздать задания (включая только что появившиеся)
             await fire_push_dispatch(bot)
     except Exception as e:  # noqa: BLE001

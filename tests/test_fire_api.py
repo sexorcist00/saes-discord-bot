@@ -16,11 +16,26 @@ class FakeDB:
         return None
 
 
+class FakeConfig:
+    def get_main_server_id(self):
+        return 1
+
+    def get_fire_admin_role_ids(self):
+        return []
+
+    def get_fire_allowed_role_ids(self):
+        return []
+
+
 class FakeBot:
     def __init__(self):
         self.db = FakeDB()
         self.fire = FireCoordinator(FireConfig(place_range=50))
         self.fire_ws = {}
+        self.config = FakeConfig()
+
+    def get_guild(self, gid):
+        return None   # check_fire_roles → (False, False) без обращения к Discord
 
 
 IP = "1.2.3.4:7777"
@@ -65,6 +80,8 @@ async def test_ws_ignite_dispatches_place_job(client):
         await ws.send_str(json.dumps({"t": "hello", "token": "good",
                                       "server_ip": IP, "pos": {"x": 0, "y": 0, "z": 0}}))
         await _recv_until(ws, "welcome")
+        # Выдаём роль поджога этому воркеру (в реале — check_fire_roles на hello).
+        client.bot.fire.workers["u1"].can_ignite = True
         # Поджог → бэкенд создаёт place-задание и пушит его нам (единственный воркер).
         await ws.send_str(json.dumps({"t": "ignite", "server_ip": IP,
                                       "x": 1, "y": 1, "z": 0, "nx": 0, "ny": 0, "nz": 1}))
