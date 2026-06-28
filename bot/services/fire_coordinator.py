@@ -460,6 +460,7 @@ class FireCoordinator:
             "spreadMaxPerTick": c.spread_max_per_tick,
             "windX": c.wind_x, "windY": c.wind_y, "windStrength": c.wind_strength,
             "slopeBias": c.slope_bias, "fuelBias": c.fuel_bias, "fuelSurfaces": c.fuel_surfaces,
+            "burnSeconds": c.burn_seconds,
             "extWaterPerSec": c.ext_water_per_sec, "extRange": c.ext_range, "extRadius": c.ext_radius,
             "paused": c.paused,
         }
