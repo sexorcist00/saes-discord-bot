@@ -69,6 +69,14 @@ class FireConfig:
     ext_range: float = 12.0          # дальность струи (м)
     ext_radius: float = 3.0          # радиус захвата у точки удара (м)
     paused: bool = False             # админ-«стоп»: клиенты не предлагают новых очагов
+    # ── Воксельное поле + волновая ориентация (общесерверно: все воркеры считают одинаково) ──
+    cell: float = 0.5                # размер вокселя поля (м)
+    field_region: float = 30.0       # радиус активной зоны поля у игрока (м)
+    field_climb_max: float = 1.0     # макс. шаг вверх для ходьбы (бордюр/ступень)
+    field_head_min: float = 1.0      # мин. высота общего воздушного окна (воздух-связность)
+    field_rise_max: float = 4.5      # макс. подъём тягой сквозь чистый воздух (этаж)
+    field_drop_max: float = 4.5      # макс. падение огня на нижнюю поверхность
+    buoy_enable: bool = True         # тяга вверх (иначе только ходьба + падение)
     # Горючие типы ПОВЕРХНОСТЕЙ SA (surfaceType из колпоинта raycast): дерево/трава/листва.
     # Клиент по ним повышает вес кандидата (материал надёжнее перечня моделей). Дефолт ПУСТ —
     # populate'ится после калибровки: /firedebug покажет surfaceType кандидатов в игре.
@@ -463,6 +471,11 @@ class FireCoordinator:
             "burnSeconds": c.burn_seconds,
             "extWaterPerSec": c.ext_water_per_sec, "extRange": c.ext_range, "extRadius": c.ext_radius,
             "paused": c.paused,
+            # Поле + вертикаль (общесерверно для всех воркеров):
+            "cell": c.cell, "fieldRegion": c.field_region,
+            "fieldClimbMax": c.field_climb_max, "fieldHeadMin": c.field_head_min,
+            "fieldRiseMax": c.field_rise_max, "fieldDropMax": c.field_drop_max,
+            "buoyEnable": c.buoy_enable,
         }
 
     # ── Live-конфиг от админа (меню) ─────────────────────────────────────────
@@ -476,7 +489,13 @@ class FireCoordinator:
         "slope_bias": (0.0, 4.0), "fuel_bias": (0.0, 4.0),
         "ext_water_per_sec": (1.0, 1000.0), "ext_range": (1.0, 60.0), "ext_radius": (0.5, 30.0),
         "max_cells": (1, 1000), "max_inflight": (1, 32), "cooldown_s": (0.0, 600.0),
+        # Поле + вертикаль (общесерверно):
+        "cell": (0.25, 1.5), "field_region": (8.0, 40.0),
+        "field_climb_max": (0.3, 4.0), "field_head_min": (0.3, 3.0),
+        "field_rise_max": (0.0, 8.0), "field_drop_max": (0.0, 8.0),
     }
+    # Булевы config-ключи (через set_config; bounds не применяются).
+    _CONFIG_BOOLS = {"buoy_enable"}
 
     def set_config(self, params: dict) -> dict:
         """Применить настройки от админа. Возвращает обновлённый caps."""
@@ -485,6 +504,11 @@ class FireCoordinator:
             if k == "fuel_surfaces" and isinstance(v, list):
                 self.cfg.fuel_surfaces = [int(s) for s in v if isinstance(s, (int, float))]
                 applied[k] = self.cfg.fuel_surfaces
+                continue
+            if k in self._CONFIG_BOOLS:
+                bv = bool(v)
+                setattr(self.cfg, k, bv)
+                applied[k] = bv
                 continue
             b = self._CONFIG_BOUNDS.get(k)
             if not b:
@@ -530,4 +554,32 @@ class FireCoordinator:
                 w.inflight.clear()
         self._gc_incidents()
         logger.info("fire wipe: снято %d ячеек, %d заданий (server_ip=%s)", len(ckeys), len(jids), server_ip)
+        return len(ckeys)
+
+    def wipe_radius(self, server_ip: str, x: float, y: float, z: float, radius: float) -> int:
+        """Сброс ячеек В РАДИУСЕ вокруг точки (+их задания) — локальное тушение зоны, а
+        не глобальный wipe. Объекты в мире удаляет клиент (/dobjects своих); здесь снимаем
+        логическое состояние, чтобы спред не возрождал очаги и cells_near очистился."""
+        r2 = max(0.0, radius) ** 2
+        ckeys = []
+        for k, c in self.cells.items():
+            if server_ip and c.server_ip != server_ip:
+                continue
+            dx, dy, dz = c.x - x, c.y - y, c.z - z
+            if dx * dx + dy * dy + dz * dz <= r2:
+                ckeys.append(k)
+        gks = {k[1] for k in ckeys}
+        for k in ckeys:
+            self.cells.pop(k, None)
+        # Задания снятых ячеек (по тому же (server_ip, grid_key)).
+        jids = [j for j, job in self.jobs.items()
+                if (not server_ip or job.server_ip == server_ip) and job.grid_key in gks]
+        jset = set(jids)
+        for j in jids:
+            self.jobs.pop(j, None)
+        for w in self.workers.values():
+            w.inflight -= jset
+        self._gc_incidents()
+        logger.info("fire wipe_radius: снято %d ячеек, %d заданий в r=%.0f @ %.0f,%.0f,%.0f (server_ip=%s)",
+                    len(ckeys), len(jids), radius, x, y, z, server_ip)
         return len(ckeys)

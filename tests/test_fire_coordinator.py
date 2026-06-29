@@ -191,3 +191,41 @@ def test_caps_expose_grid_and_range():
     caps = coord.caps()
     assert caps["grid"] == 2.0 and caps["spreadMinHeat"] == 40
     assert caps["placeRange"] == 28 and caps["heatRamp"] == 20.0
+
+
+def test_wipe_radius_removes_only_in_radius():
+    coord, _ = make()
+    connect(coord, "u1", 0, 0, 0)
+    coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)        # в радиусе
+    coord.ignite("u1", 5, 0, 0, 0, 0, 1, IP)        # в радиусе (5 < 10)
+    coord.ignite("u1", 100, 100, 0, 0, 0, 1, IP)    # вне радиуса
+    assert len(coord.cells) == 3
+    n = coord.wipe_radius(IP, 0, 0, 0, 10.0)
+    assert n == 2
+    assert len(coord.cells) == 1
+    c = next(iter(coord.cells.values()))
+    assert abs(c.x - 100) < 1e-6           # осталась дальняя
+    assert len(coord.jobs) == 1            # её place-задание тоже осталось
+
+
+def test_wipe_radius_clears_inflight():
+    coord, _ = make()
+    connect(coord, "u1", 0, 0, 0)
+    coord.ignite("u1", 1, 1, 0, 0, 0, 1, IP)
+    out = coord.dispatch()
+    jid = out[0][1]["id"]
+    assert jid in coord.workers["u1"].inflight
+    coord.wipe_radius(IP, 0, 0, 0, 30.0)
+    assert jid not in coord.workers["u1"].inflight
+    assert len(coord.cells) == 0
+
+
+def test_wipe_radius_respects_server_ip():
+    coord, _ = make()
+    connect(coord, "u1", 0, 0, 0, ip=IP)
+    connect(coord, "u2", 0, 0, 0, ip="9.9.9.9:7777")
+    coord.ignite("u1", 0, 0, 0, 0, 0, 1, IP)
+    coord.ignite("u2", 0, 0, 0, 0, 0, 1, "9.9.9.9:7777")
+    n = coord.wipe_radius(IP, 0, 0, 0, 10.0)
+    assert n == 1                          # снят только очаг своего server_ip
+    assert len(coord.cells) == 1

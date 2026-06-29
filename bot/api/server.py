@@ -497,6 +497,16 @@ async def handle_fire_admin(request: web.Request) -> web.Response:
         logger.info("fire admin wipe by user=%s: снято %d ячеек (server_ip=%s)",
                     link["discord_user_id"], n, server_ip)
         return web.json_response({"ok": True, "wiped": n})
+    if action == "wipe_radius":
+        try:
+            x = float(data.get("x")); y = float(data.get("y")); z = float(data.get("z"))
+            radius = float(data.get("radius") or 30.0)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "BAD_COORDS"}, status=400)
+        n = fire.wipe_radius(server_ip, x, y, z, radius)
+        logger.info("fire admin wipe_radius by user=%s: снято %d ячеек r=%.0f (server_ip=%s)",
+                    link["discord_user_id"], n, radius, server_ip)
+        return web.json_response({"ok": True, "wiped": n})
     return web.json_response({"error": "BAD_ACTION"}, status=400)
 
 
