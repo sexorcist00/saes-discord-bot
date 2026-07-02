@@ -41,7 +41,7 @@ KIND_REMOVE = "remove"
 
 @dataclass
 class FireConfig:
-    grid: float = 1.2             # шаг огня (размер корзины gridKey) — ОБЯЗАН совпадать у всех клиентов
+    grid: float = 1.8             # шаг огня (размер корзины gridKey) — ОБЯЗАН совпадать у всех клиентов
     grid_z: float = 2.0
     max_cells: int = 60            # кап активных ячеек на incident
     cooldown_s: float = 30.0       # потушенная ячейка не вспыхивает это время

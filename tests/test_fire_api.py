@@ -71,7 +71,7 @@ async def test_ws_hello_welcome_and_worker_registered(client):
         await ws.send_str(json.dumps({"t": "hello", "token": "good",
                                       "server_ip": IP, "pos": {"x": 0, "y": 0, "z": 0}}))
         welcome = await _recv_until(ws, "welcome")
-        assert "caps" in welcome and welcome["caps"]["grid"] == 1.2
+        assert "caps" in welcome and welcome["caps"]["grid"] == 1.8
         assert "u1" in client.bot.fire.workers
 
 
