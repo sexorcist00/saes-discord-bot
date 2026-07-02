@@ -41,7 +41,7 @@ KIND_REMOVE = "remove"
 
 @dataclass
 class FireConfig:
-    grid: float = 2.0
+    grid: float = 1.2             # шаг огня (размер корзины gridKey) — ОБЯЗАН совпадать у всех клиентов
     grid_z: float = 2.0
     max_cells: int = 60            # кап активных ячеек на incident
     cooldown_s: float = 30.0       # потушенная ячейка не вспыхивает это время
@@ -49,22 +49,33 @@ class FireConfig:
     heat_max: float = 100.0
     heat_ramp_per_s: float = 20.0  # рост heat у burning (за сек)
     water_factor: float = 1.0
-    spread_min_heat: float = 40.0  # клиент спредит только очаги с heat выше этого
+    spread_min_heat: float = 30.0  # клиент спредит только очаги с heat выше этого (разгон ≈ spread_min_heat/heat_ramp)
     # Воркер-пул / задания:
     place_range: float = 28.0      # макс. дистанция воркер→цель для постановки (лимит /objects)
     max_inflight: int = 2          # сколько заданий разом на воркера (заставляет распределять)
     job_timeout_s: float = 10.0    # задание не подтверждено → переназначить
     worker_stale_s: float = 12.0   # воркер без вестей дольше — офлайн (реквью его заданий)
     # ── Настраиваемые админом (live через меню; уходят клиентам в caps) ──
-    spread_interval: float = 2.5   # сек между расчётами спреда на клиенте
+    spread_interval: float = 1.5   # сек между расчётами спреда на клиенте (меньше = плавнее фронт)
     spread_chance: float = 0.55    # вероятность кандидата в сторону
-    spread_max_per_tick: int = 6   # лимит новых кандидатов за расчёт
-    burn_seconds: float = 0.0      # автозатухание очага (0 = горит до тушения)
+    spread_max_per_tick: int = 3   # лимит новых кандидатов за расчёт
     wind_x: float = 0.0            # вектор ветра (нормируется на клиенте)
     wind_y: float = 0.0
     wind_strength: float = 0.0     # 0..1 — сила направленного биаса
-    slope_bias: float = 0.5        # вклад «вверх по склону быстрее» (0 = выкл)
-    fuel_bias: float = 0.5         # вклад тяги к горючим поверхностям (0 = выкл)
+    slope_bias: float = 0.0        # вклад «вверх по склону быстрее» (0 = выкл, нейтральный фронт)
+    fuel_bias: float = 0.5         # вклад тяги к горючим поверхностям (инертен без fuel_surfaces)
+    # ── Rate-модель (тепловой порог; см. fire/rate.lua) — общесерверно, все клиенты считают одинаково ──
+    emit_rate: float = 0.6         # тепло/сек от очага полной интенсивности соседу вплотную
+    heat_radius_mul: float = 1.6   # радиус теплопередачи = mul·grid (форма фронта)
+    ignite_threshold: float = 1.0  # накопленное тепло, при котором кандидат вспыхивает
+    joules_per_unit: float = 50000.0  # ТОЛЬКО дисплей: Дж на единицу тепла (панель дебага)
+    fuel_obj_bias: float = 0.6     # тяга к горючим ОБЪЕКТАМ (инертна без fuel_models)
+    fuel_obj_radius: float = 4.0   # радиус сэмплинга объектов вокруг очага (м)
+    fuel_models: list = field(default_factory=list)  # горючие model id (калибруется как fuel_surfaces)
+    lookahead: int = 2             # на сколько клеток волна заглядывает за фронт
+    wave_budget: int = 3000        # потолок узлов flood-fill за тик
+    wave_enable: bool = True       # мастер-включатель волнового распространения (общесерверно)
+    wave_dry_run: bool = True      # True = считать+рисовать волну, но НЕ ставить объекты на сервер
     ext_water_per_sec: float = 60.0  # скорость воды огнетушителя
     ext_range: float = 12.0          # дальность струи (м)
     ext_radius: float = 3.0          # радиус захвата у точки удара (м)
@@ -100,7 +111,6 @@ class Cell:
     server_object_id: Optional[int] = None
     placed_by: Optional[str] = None
     created_ts: float = 0.0
-    burning_ts: float = 0.0
     out_ts: float = 0.0
 
     def to_near(self) -> dict:
@@ -315,7 +325,6 @@ class FireCoordinator:
                     cell.state = STATE_BURNING
                     cell.server_object_id = int(server_id)
                     cell.placed_by = user_id
-                    cell.burning_ts = now
                     logger.info("burning gk=%s serverId=%s by=%s", cell.grid_key, server_id, user_id)
                 else:
                     cell.state = STATE_OUT
@@ -367,13 +376,7 @@ class FireCoordinator:
             if c.state == STATE_BURNING:
                 if c.heat < self.cfg.heat_max:
                     c.heat = min(self.cfg.heat_max, c.heat + self.cfg.heat_ramp_per_s)
-                # Автозатухание очага (если включено админом): после burn_seconds горения.
-                if self.cfg.burn_seconds > 0 and c.burning_ts > 0 \
-                        and (now - c.burning_ts) >= self.cfg.burn_seconds:
-                    c.state = STATE_EXTINGUISHING
-                    c.heat = 0.0
-                    self._ensure_remove_job(c)
-                    logger.info("auto-burnout gk=%s (горел %.0fс)", c.grid_key, now - c.burning_ts)
+                # Выгорание убрано: очаг горит бессрочно (вечный огонь), снимается только тушением.
             elif c.state == STATE_EXTINGUISHING:
                 self._ensure_remove_job(c)
             elif c.state == STATE_OUT and (now - c.out_ts) > self.cfg.cooldown_s:
@@ -466,9 +469,14 @@ class FireCoordinator:
             # настраиваемые (клиент читает для спреда/тушения):
             "spreadInterval": c.spread_interval, "spreadChance": c.spread_chance,
             "spreadMaxPerTick": c.spread_max_per_tick,
+            # Rate-модель (общесерверно — иначе клиенты посчитают пожар по-разному):
+            "emitRate": c.emit_rate, "heatRadiusMul": c.heat_radius_mul,
+            "igniteThreshold": c.ignite_threshold, "joulesPerUnit": c.joules_per_unit,
+            "lookahead": c.lookahead, "waveBudget": c.wave_budget,
+            "waveEnable": c.wave_enable, "waveDryRun": c.wave_dry_run,
             "windX": c.wind_x, "windY": c.wind_y, "windStrength": c.wind_strength,
             "slopeBias": c.slope_bias, "fuelBias": c.fuel_bias, "fuelSurfaces": c.fuel_surfaces,
-            "burnSeconds": c.burn_seconds,
+            "fuelObjBias": c.fuel_obj_bias, "fuelObjRadius": c.fuel_obj_radius, "fuelModels": c.fuel_models,
             "extWaterPerSec": c.ext_water_per_sec, "extRange": c.ext_range, "extRadius": c.ext_radius,
             "paused": c.paused,
             # Поле + вертикаль (общесерверно для всех воркеров):
@@ -484,9 +492,13 @@ class FireCoordinator:
     _CONFIG_BOUNDS = {
         "spread_interval": (0.3, 30.0), "spread_chance": (0.0, 1.0),
         "spread_max_per_tick": (1, 64), "heat_ramp_per_s": (1.0, 200.0),
-        "spread_min_heat": (0.0, 100.0), "burn_seconds": (0.0, 3600.0),
+        "spread_min_heat": (0.0, 100.0),
         "wind_x": (-1.0, 1.0), "wind_y": (-1.0, 1.0), "wind_strength": (0.0, 1.0),
         "slope_bias": (0.0, 4.0), "fuel_bias": (0.0, 4.0),
+        # Rate-модель (grid НЕ здесь — смена на лету рассинхронит gridKey у клиентов):
+        "emit_rate": (0.0, 5.0), "heat_radius_mul": (0.5, 4.0), "ignite_threshold": (0.1, 10.0),
+        "fuel_obj_bias": (0.0, 4.0), "fuel_obj_radius": (1.0, 20.0),
+        "lookahead": (1, 8), "wave_budget": (500, 20000),
         "ext_water_per_sec": (1.0, 1000.0), "ext_range": (1.0, 60.0), "ext_radius": (0.5, 30.0),
         "max_cells": (1, 1000), "max_inflight": (1, 32), "cooldown_s": (0.0, 600.0),
         # Поле + вертикаль (общесерверно):
@@ -495,7 +507,7 @@ class FireCoordinator:
         "field_rise_max": (0.0, 8.0), "field_drop_max": (0.0, 8.0),
     }
     # Булевы config-ключи (через set_config; bounds не применяются).
-    _CONFIG_BOOLS = {"buoy_enable"}
+    _CONFIG_BOOLS = {"buoy_enable", "wave_enable", "wave_dry_run"}
 
     def set_config(self, params: dict) -> dict:
         """Применить настройки от админа. Возвращает обновлённый caps."""
@@ -518,7 +530,7 @@ class FireCoordinator:
             except (TypeError, ValueError):
                 continue
             val = max(b[0], min(b[1], val))
-            if k in ("spread_max_per_tick", "max_cells", "max_inflight"):
+            if k in ("spread_max_per_tick", "max_cells", "max_inflight", "lookahead", "wave_budget"):
                 val = int(val)
             setattr(self.cfg, k, val)
             applied[k] = val

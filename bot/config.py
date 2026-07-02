@@ -342,13 +342,20 @@ class Config:
         allowed = ('grid', 'grid_z', 'max_cells', 'cooldown_s', 'merge_dist',
                    'heat_max', 'heat_ramp_per_s', 'water_factor', 'spread_min_heat',
                    'place_range', 'max_inflight', 'job_timeout_s', 'worker_stale_s',
-                   'spread_interval', 'spread_chance', 'spread_max_per_tick', 'burn_seconds',
+                   'spread_interval', 'spread_chance', 'spread_max_per_tick',
                    'wind_x', 'wind_y', 'wind_strength', 'slope_bias', 'fuel_bias',
+                   # Rate-модель (общесерверно; см. fire/rate.lua):
+                   'emit_rate', 'heat_radius_mul', 'ignite_threshold', 'joules_per_unit',
+                   'fuel_obj_bias', 'fuel_obj_radius', 'lookahead', 'wave_budget',
                    'ext_water_per_sec', 'ext_range', 'ext_radius')
         params = {k: sec[k] for k in allowed if k in sec and sec[k] is not None}
-        fs = sec.get('fuel_surfaces')
-        if isinstance(fs, list):
-            params['fuel_surfaces'] = [int(x) for x in fs if x is not None]
+        for b in ('buoy_enable', 'wave_enable', 'wave_dry_run'):
+            if b in sec and sec[b] is not None:
+                params[b] = bool(sec[b])
+        for lst in ('fuel_surfaces', 'fuel_models'):
+            v = sec.get(lst)
+            if isinstance(v, list):
+                params[lst] = [int(x) for x in v if x is not None]
         return params
 
     def _fire_role_ids(self, key: str) -> List[int]:
