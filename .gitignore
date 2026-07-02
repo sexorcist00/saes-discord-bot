@@ -30,9 +30,9 @@ logs/*.log
 Thumbs.db
 desktop.ini
 
-# Config (if contains sensitive data)
-# Uncomment the line below if your config contains sensitive information
-# config/config.yaml
+# Config: локальные настройки сервера (enabled/роли/тюнинг). Шаблон — config/config.example.yaml.
+# Не трекается, чтобы pull не конфликтовал с боевыми значениями на VDS.
+config/config.yaml
 
 # Distribution / packaging
 .Python
