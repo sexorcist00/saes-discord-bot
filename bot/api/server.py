@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple
 import discord
 from aiohttp import web
 
+from bot.services.hose_registry import HoseRegistry
 from bot.utils.logger import get_logger
 
 logger = get_logger("api.server")
@@ -357,6 +358,30 @@ async def fire_push_dispatch(bot) -> None:
         await _ws_send(bot.fire_ws.get(uid), {"t": "job", "job": payload})
 
 
+# ── Рукавные линии (HOSE-LINE.md): реестр топологии + broadcast по игровому серверу ──
+
+def _hose_reg(bot) -> HoseRegistry:
+    """Реестр линий (ленивая инициализация: main.py не трогаем, тесты получают свой)."""
+    reg = getattr(bot, "hoses", None)
+    if reg is None:
+        reg = HoseRegistry()
+        bot.hoses = reg
+    return reg
+
+
+async def hose_broadcast(bot, server_ip: str, payload: dict, exclude_uid=None) -> None:
+    """Разослать hose_* всем воркерам ТОГО ЖЕ игрового сервера (кроме отправителя)."""
+    fire = getattr(bot, "fire", None)
+    if not fire or not server_ip:
+        return
+    for uid, ws in list(bot.fire_ws.items()):
+        if uid == exclude_uid:
+            continue
+        w = fire.workers.get(uid)
+        if w and w.server_ip == server_ip:
+            await _ws_send(ws, payload)
+
+
 async def fire_push_states(bot) -> None:
     """Разослать каждому воркеру состояние ближних очагов (для оверлея/спреда)."""
     if not getattr(bot, "fire", None):
@@ -409,6 +434,10 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
                                     "canIgnite": can_ignite, "isAdmin": is_admin})
                 await fire_push_dispatch(bot)
                 await _ws_send(ws, {"t": "state", **fire.state_for(user_id)})
+                # Снапшот активных рукавных линий этого игрового сервера (поздно вошедшему).
+                hoses = _hose_reg(bot).snapshot(server_ip)
+                if hoses:
+                    await _ws_send(ws, {"t": "hose_state", "hoses": hoses})
                 continue
 
             sip = str(data.get("server_ip") or "")
@@ -440,6 +469,27 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
                     await fire_push_states(bot)
                 else:
                     await _ws_send(ws, {"t": "error", "reason": "NO_ADMIN_ROLE"})
+            elif t == "hose_create":
+                # Рукавная линия: валидация+реестр, эхо-broadcast остальным того же сервера.
+                clean = _hose_reg(bot).upsert(user_id, sip, data)
+                if clean is not None:
+                    await hose_broadcast(bot, sip, {"t": "hose_create", **clean},
+                                         exclude_uid=user_id)
+                else:
+                    await _ws_send(ws, {"t": "error", "reason": "HOSE_REJECTED"})
+            elif t == "hose_attach":
+                # Бросок/поднятие ствола: drop = поза (лежит) или false (в руке).
+                res = _hose_reg(bot).attach(user_id, data)
+                if res is not None:
+                    await hose_broadcast(bot, res["server_ip"],
+                                         {"t": "hose_attach", "id": res["id"], "drop": res["drop"]},
+                                         exclude_uid=user_id)
+            elif t == "hose_remove":
+                hid = str(data.get("id") or "")
+                hose_sip = _hose_reg(bot).remove(hid, user_id)
+                if hose_sip:
+                    await hose_broadcast(bot, hose_sip, {"t": "hose_remove", "id": hid},
+                                         exclude_uid=user_id)
             elif t == "cmd":
                 if worker and worker.is_admin:
                     action = str(data.get("action") or "")
@@ -465,6 +515,10 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
         if user_id and bot.fire_ws.get(user_id) is ws:
             fire.worker_disconnect(user_id)
             bot.fire_ws.pop(user_id, None)
+            # TTL рукавов: линии владельца сносятся у всех (у него физика умерла вместе с ним).
+            for gone in _hose_reg(bot).remove_all_for(user_id):
+                await hose_broadcast(bot, gone["server_ip"],
+                                     {"t": "hose_remove", "id": gone["id"]})
             await fire_push_dispatch(bot)   # реквью раздать оставшимся
             logger.info("fire ws closed user=%s", user_id)
     return ws
