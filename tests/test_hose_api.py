@@ -235,10 +235,13 @@ def test_shape_sanitize_and_rate_limit():
     assert reg.upsert("u1", IP, dict(HOSE)) is not None
     frame = {"id": "Nick:1", "k": 1, "ax": 10.0, "ay": 20.0, "az": 3.0,
              "n": [0, 0, 0, 120, -50, 10], "f": 0.5,
-             "m": {"x": 1, "y": 2, "z": 3, "dx": 1, "dy": 0, "dz": 0}, "fire": True}
+             "m": {"x": 1, "y": 2, "z": 3, "dx": 1, "dy": 0, "dz": 0},
+             "fire": True, "loose": True}
     res = reg.shape_ok("u1", dict(frame), now=100.0)
     assert res["n"] == [0, 0, 0, 120, -50, 10] and res["fire"] is True
+    assert res["loose"] is True                                     # летящий ствол доезжает
     assert res["server_ip"] == IP
+    assert "loose" not in sanitize_shape(dict(frame, loose=None))   # мусор не ломает/не утекает
     # rate-limit: второй кадр раньше min-интервала — дроп; после интервала — ок
     assert reg.shape_ok("u1", dict(frame, k=2), now=100.0 + SHAPE_MIN_INTERVAL / 2) is None
     assert reg.shape_ok("u1", dict(frame, k=3), now=100.0 + SHAPE_MIN_INTERVAL + 0.01) is not None
@@ -293,10 +296,11 @@ async def test_hose_shape_relayed_not_stored(client):
     await ws1.send_str(json.dumps({"t": "hose_shape", "id": "Nick:1", "server_ip": IP,
                                    "k": 7, "ax": 1.0, "ay": 2.0, "az": 3.0,
                                    "n": [0, 0, 0, 100, 0, -20], "f": 0.75, "fire": True,
+                                   "loose": True,
                                    "m": {"x": 4, "y": 5, "z": 1, "dx": 0, "dy": 1, "dz": 0}}))
     msg = await _recv_until(ws2, "hose_shape")
     assert msg["k"] == 7 and msg["n"] == [0, 0, 0, 100, 0, -20] and msg["f"] == 0.75
-    assert msg["fire"] is True and msg["m"]["dy"] == 1.0
+    assert msg["fire"] is True and msg["m"]["dy"] == 1.0 and msg["loose"] is True
     assert "server_ip" not in msg                                   # служебное поле не утекает
     # реестр форму НЕ хранит: payload линии без узлов
     assert "n" not in client.bot.hoses.hoses["Nick:1"]["payload"]

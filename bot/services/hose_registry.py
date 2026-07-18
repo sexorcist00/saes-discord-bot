@@ -111,6 +111,8 @@ def sanitize_shape(data: dict) -> Optional[dict]:
             return None
     if data.get("fire"):
         out["fire"] = True
+    if data.get("loose"):
+        out["loose"] = True                # летящий ствол (хлыст): remote ведёт flyObject
     return out
 
 
