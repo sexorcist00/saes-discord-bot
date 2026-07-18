@@ -490,6 +490,36 @@ async def handle_fire_ws(request: web.Request) -> web.StreamResponse:
                 if hose_sip:
                     await hose_broadcast(bot, hose_sip, {"t": "hose_remove", "id": hid},
                                          exclude_uid=user_id)
+            elif t == "hose_water":
+                # Кран/давление/агент линии: owner-only мутация payload + relay.
+                res = _hose_reg(bot).set_water(user_id, data)
+                if res is not None:
+                    await hose_broadcast(bot, res["server_ip"],
+                                         {"t": "hose_water", "id": res["id"], **res["w"]},
+                                         exclude_uid=user_id)
+            elif t == "hose_stow":
+                # Скатка: смотан (в руке/на земле) или размотан (deploy → stow=false).
+                res = _hose_reg(bot).set_stow(user_id, data)
+                if res is not None:
+                    await hose_broadcast(bot, res["server_ip"],
+                                         {"t": "hose_stow", "id": res["id"], "stow": res["stow"]},
+                                         exclude_uid=user_id)
+            elif t == "hose_shape":
+                # Кадр формы от владельца: чистый ретранслятор (не хранится),
+                # rate-limit на линию; флуд/чужое/мусор — молча дропаем (без error:
+                # кадры формы идут 8 Гц, эхо ошибок само стало бы флудом).
+                res = _hose_reg(bot).shape_ok(user_id, data)
+                if res is not None:
+                    hose_sip = res.pop("server_ip")
+                    await hose_broadcast(bot, hose_sip, {"t": "hose_shape", **res},
+                                         exclude_uid=user_id)
+            elif t == "hose_knock":
+                # Сбивание струёй: ретранслятор по серверу ОТПРАВИТЕЛЯ (жертва сама
+                # применит импульс только к своему педу — анти-чит на приёмнике).
+                res = _hose_reg(bot).knock_ok(user_id, data)
+                if res is not None and worker is not None:
+                    await hose_broadcast(bot, worker.server_ip,
+                                         {"t": "hose_knock", **res}, exclude_uid=user_id)
             elif t == "cmd":
                 if worker and worker.is_admin:
                     action = str(data.get("action") or "")

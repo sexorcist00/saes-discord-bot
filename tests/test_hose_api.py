@@ -7,7 +7,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from bot.api.server import build_app
 from bot.services.fire_coordinator import FireCoordinator, FireConfig
-from bot.services.hose_registry import HoseRegistry, sanitize
+from bot.services.hose_registry import (HoseRegistry, sanitize, sanitize_shape,
+                                        sanitize_knock, SHAPE_MIN_INTERVAL,
+                                        KNOCK_MIN_INTERVAL)
 
 
 class FakeDB:
@@ -194,3 +196,123 @@ async def test_hose_rejected_reports_error(client):
     msg = await _recv_until(ws1, "error")
     assert msg["reason"] == "HOSE_REJECTED"
     await ws1.close()
+
+
+# ── Синк физики/воды: class/w/stow в create+снапшоте, water/stow/shape/knock ──
+
+def test_sanitize_class_water_stow_fields():
+    clean = sanitize(dict(HOSE, **{"class": "supply",
+                                   "w": {"on": 1, "p": 7.5, "agent": "napalm"},
+                                   "stow": {"mode": "ground", "x": 1, "y": 2, "z": 3,
+                                            "ang": 0.5, "noz": True}}))
+    assert clean["class"] == "supply"
+    assert clean["w"] == {"on": True, "p": 1.0, "agent": "water"}   # клампы p и агента
+    assert clean["stow"]["mode"] == "ground" and clean["stow"]["noz"] is True
+    clean = sanitize(dict(HOSE, **{"class": "мусор"}))
+    assert clean["class"] == "attack"                               # неизвестный класс → attack
+    assert "stow" not in clean and clean.get("w") is None
+
+
+def test_registry_set_water_and_stow_owner_only():
+    reg = HoseRegistry()
+    assert reg.upsert("u1", IP, dict(HOSE)) is not None
+    res = reg.set_water("u1", {"id": "Nick:1", "on": True, "p": 0.8, "agent": "foam"})
+    assert res["w"] == {"on": True, "p": 0.8, "agent": "foam"} and res["server_ip"] == IP
+    assert reg.snapshot(IP)[0]["w"]["p"] == 0.8                     # снапшот видит кран
+    assert reg.set_water("u2", {"id": "Nick:1", "on": True}) is None    # чужой не может
+    stow = {"mode": "hand", "x": 1, "y": 2, "z": 3, "ang": 0.1}
+    res = reg.set_stow("u1", {"id": "Nick:1", "stow": stow})
+    assert res["stow"]["mode"] == "hand"
+    assert reg.snapshot(IP)[0]["stow"]["mode"] == "hand"            # снапшот видит скатку
+    assert reg.set_stow("u2", {"id": "Nick:1", "stow": stow}) is None
+    assert reg.set_stow("u1", {"id": "Nick:1", "stow": {"mode": "орбита"}}) is None
+    res = reg.set_stow("u1", {"id": "Nick:1", "stow": False})       # размотал
+    assert res["stow"] is False and "stow" not in reg.snapshot(IP)[0]
+
+
+def test_shape_sanitize_and_rate_limit():
+    reg = HoseRegistry()
+    assert reg.upsert("u1", IP, dict(HOSE)) is not None
+    frame = {"id": "Nick:1", "k": 1, "ax": 10.0, "ay": 20.0, "az": 3.0,
+             "n": [0, 0, 0, 120, -50, 10], "f": 0.5,
+             "m": {"x": 1, "y": 2, "z": 3, "dx": 1, "dy": 0, "dz": 0}, "fire": True}
+    res = reg.shape_ok("u1", dict(frame), now=100.0)
+    assert res["n"] == [0, 0, 0, 120, -50, 10] and res["fire"] is True
+    assert res["server_ip"] == IP
+    # rate-limit: второй кадр раньше min-интервала — дроп; после интервала — ок
+    assert reg.shape_ok("u1", dict(frame, k=2), now=100.0 + SHAPE_MIN_INTERVAL / 2) is None
+    assert reg.shape_ok("u1", dict(frame, k=3), now=100.0 + SHAPE_MIN_INTERVAL + 0.01) is not None
+    # чужая линия / мусор
+    assert reg.shape_ok("u2", dict(frame, k=4), now=200.0) is None
+    assert sanitize_shape(dict(frame, n=[1, 2])) is None            # не кратно 3
+    assert sanitize_shape(dict(frame, n=list(range(3 * 200)))) is None  # >128 узлов
+    assert sanitize_shape({"id": "x", "n": "мусор"}) is None
+
+
+def test_knock_sanitize_and_rate_limit():
+    reg = HoseRegistry()
+    knock = {"pid": 45, "vx": 3.0, "vy": 0.0, "vz": 99.0}
+    res = reg.knock_ok("u1", dict(knock), now=10.0)
+    assert res["pid"] == 45 and res["vz"] == 50.0                   # кламп импульса
+    assert reg.knock_ok("u1", dict(knock), now=10.0 + KNOCK_MIN_INTERVAL / 2) is None
+    assert reg.knock_ok("u1", dict(knock), now=10.0 + KNOCK_MIN_INTERVAL + 0.01) is not None
+    assert sanitize_knock({"pid": 4000}) is None                    # pid вне диапазона
+    assert sanitize_knock({"pid": "мусор"}) is None
+
+
+async def test_hose_water_and_stow_broadcast(client):
+    ws1 = await _hello(client, "good")
+    await _recv_until(ws1, "welcome")
+    ws2 = await _hello(client, "good2")
+    await _recv_until(ws2, "welcome")
+
+    await ws1.send_str(json.dumps(dict(HOSE, **{"class": "supply"})))
+    msg = await _recv_until(ws2, "hose_create")
+    assert msg["class"] == "supply"                                 # класс доехал
+    await ws1.send_str(json.dumps({"t": "hose_water", "id": "Nick:1", "server_ip": IP,
+                                   "on": True, "p": 0.9, "agent": "water"}))
+    msg = await _recv_until(ws2, "hose_water")
+    assert msg["id"] == "Nick:1" and msg["on"] is True and msg["p"] == 0.9
+    await ws1.send_str(json.dumps({"t": "hose_stow", "id": "Nick:1", "server_ip": IP,
+                                   "stow": {"mode": "ground", "x": 1, "y": 2, "z": 3,
+                                            "ang": 0.7}}))
+    msg = await _recv_until(ws2, "hose_stow")
+    assert msg["stow"]["mode"] == "ground"
+    await ws1.close()
+    await ws2.close()
+
+
+async def test_hose_shape_relayed_not_stored(client):
+    ws1 = await _hello(client, "good")
+    await _recv_until(ws1, "welcome")
+    ws2 = await _hello(client, "good2")
+    await _recv_until(ws2, "welcome")
+
+    await ws1.send_str(json.dumps(HOSE))
+    await _recv_until(ws2, "hose_create")
+    await ws1.send_str(json.dumps({"t": "hose_shape", "id": "Nick:1", "server_ip": IP,
+                                   "k": 7, "ax": 1.0, "ay": 2.0, "az": 3.0,
+                                   "n": [0, 0, 0, 100, 0, -20], "f": 0.75, "fire": True,
+                                   "m": {"x": 4, "y": 5, "z": 1, "dx": 0, "dy": 1, "dz": 0}}))
+    msg = await _recv_until(ws2, "hose_shape")
+    assert msg["k"] == 7 and msg["n"] == [0, 0, 0, 100, 0, -20] and msg["f"] == 0.75
+    assert msg["fire"] is True and msg["m"]["dy"] == 1.0
+    assert "server_ip" not in msg                                   # служебное поле не утекает
+    # реестр форму НЕ хранит: payload линии без узлов
+    assert "n" not in client.bot.hoses.hoses["Nick:1"]["payload"]
+    await ws1.close()
+    await ws2.close()
+
+
+async def test_hose_knock_relayed(client):
+    ws1 = await _hello(client, "good")
+    await _recv_until(ws1, "welcome")
+    ws2 = await _hello(client, "good2")
+    await _recv_until(ws2, "welcome")
+
+    await ws1.send_str(json.dumps({"t": "hose_knock", "server_ip": IP,
+                                   "pid": 45, "vx": 2.5, "vy": -1.0, "vz": 4.0}))
+    msg = await _recv_until(ws2, "hose_knock")
+    assert msg["pid"] == 45 and msg["vx"] == 2.5 and msg["vz"] == 4.0
+    await ws1.close()
+    await ws2.close()
